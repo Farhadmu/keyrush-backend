@@ -15,7 +15,14 @@ import { UsersService } from '../users/users.service';
 @WebSocketGateway({
   cors: {
     origin: (origin, callback) => {
-      callback(null, true);
+      const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:3000')
+        .split(',')
+        .map(o => o.trim())
+        .concat(['http://localhost:3000', 'http://127.0.0.1:3000']);
+      if (!origin || allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+        return callback(null, true);
+      }
+      return callback(new Error(`WebSocket CORS origin rejected: ${origin}`));
     },
     credentials: true,
   },
@@ -55,8 +62,13 @@ export class MultiplayerGateway implements OnGatewayConnection, OnGatewayDisconn
         return;
       }
 
-      const secret = process.env.JWT_SECRET || 'keyrush_jwt_secret_dev_key_2026';
-      const payload = this.jwtService.verify(token, { secret });
+      const secret = process.env.JWT_SECRET;
+      if (!secret && process.env.NODE_ENV === 'production') {
+        throw new Error('CRITICAL: JWT_SECRET missing in production');
+      }
+      const payload = this.jwtService.verify(token, {
+        secret: secret || 'keyrush_jwt_secret_dev_key_2026',
+      });
 
       if (!payload || !payload.sub) {
         client.emit('race:error', { code: 'INVALID_TOKEN', message: 'Session expired or invalid.' });
@@ -349,9 +361,12 @@ export class MultiplayerGateway implements OnGatewayConnection, OnGatewayDisconn
     @MessageBody()
     data: {
       roomId: string;
-      typedIndex: number;
-      errorCount: number;
-      rawInputCount: number;
+      textBuffer?: string;
+      typedIndex?: number;
+      errorCount?: number;
+      rawInputCount?: number;
+      sequenceNumber?: number;
+      clientTimestamp?: number;
     },
   ) {
     const user = client.data.user;
@@ -360,11 +375,7 @@ export class MultiplayerGateway implements OnGatewayConnection, OnGatewayDisconn
     const { participant, raceFinished } = this.roomManager.updatePlayerTyping(
       data.roomId,
       user.userId,
-      {
-        typedIndex: data.typedIndex,
-        errorCount: data.errorCount,
-        rawInputCount: data.rawInputCount,
-      },
+      data,
     );
 
     if (!participant) return;

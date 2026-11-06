@@ -84,3 +84,4 @@ export const RaceResultSchema = SchemaFactory.createForClass(RaceResult);
 RaceResultSchema.index({ createdAt: -1 });
 RaceResultSchema.index({ 'participants.userId': 1, createdAt: -1 });
 RaceResultSchema.index({ winnerUserId: 1 });
+

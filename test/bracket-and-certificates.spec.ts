@@ -88,3 +88,4 @@ describe('Phase 4 & 12: Tournament Bracket Engine & Verifiable Certificates Test
     expect(result.totalMatchesCreated).toBe(16); // 32 / 2 = 16 first-round matches
   });
 });
+

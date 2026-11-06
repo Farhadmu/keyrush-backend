@@ -42,3 +42,4 @@ export class TypingResult {
 export const TypingResultSchema = SchemaFactory.createForClass(TypingResult);
 TypingResultSchema.index({ userId: 1, createdAt: -1 });
 TypingResultSchema.index({ userId: 1, language: 1 });
+

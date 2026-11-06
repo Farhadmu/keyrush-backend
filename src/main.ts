@@ -2,9 +2,13 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
+import { validateEnvironment } from './common/config/env.validator';
 import * as cookieParser from 'cookie-parser';
 
 async function bootstrap() {
+  // Validate environment secrets and infrastructure before app boot
+  validateEnvironment();
+
   const logger = new Logger('Bootstrap');
   const app = await NestFactory.create(AppModule);
 

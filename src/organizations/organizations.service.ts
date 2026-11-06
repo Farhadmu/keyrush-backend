@@ -139,9 +139,27 @@ export class OrganizationsService {
     return { success: true, message: 'Membership request submitted successfully.' };
   }
 
+  async assertOrgAdmin(org: OrganizationDocument, userId: string): Promise<void> {
+    if (org.ownerId.toString() === userId) return;
+    const user = await this.userModel.findById(userId);
+    if (user?.roles?.includes(UserRole.SUPER_ADMIN)) return;
+
+    const membership = await this.memberModel.findOne({
+      organizationId: org._id,
+      userId: new Types.ObjectId(userId),
+      role: { $in: [OrgRole.OWNER, OrgRole.ADMIN] },
+      status: MembershipStatus.APPROVED,
+    });
+    if (!membership) {
+      throw new ForbiddenException('Only organization administrators can perform this action.');
+    }
+  }
+
   async approveMember(orgId: string, adminUserId: string, memberId: string) {
     const org = await this.orgModel.findById(orgId);
     if (!org) throw new NotFoundException('Organization not found');
+
+    await this.assertOrgAdmin(org, adminUserId);
 
     const member = await this.memberModel.findById(memberId);
     if (!member) throw new NotFoundException('Membership request not found');
@@ -158,6 +176,8 @@ export class OrganizationsService {
   async removeMember(orgId: string, adminUserId: string, memberId: string) {
     const org = await this.orgModel.findById(orgId);
     if (!org) throw new NotFoundException('Organization not found');
+
+    await this.assertOrgAdmin(org, adminUserId);
 
     await this.memberModel.findByIdAndDelete(memberId);
     org.memberCount = Math.max(1, org.memberCount - 1);
@@ -225,12 +245,24 @@ export class OrganizationsService {
       .exec();
   }
 
-  async addTeamMember(teamId: string, userId: string) {
+  async addTeamMember(teamId: string, callerUserId: string, targetUserId: string) {
     const team = await this.teamModel.findById(teamId);
     if (!team) throw new NotFoundException('Team not found');
 
-    const userObjId = new Types.ObjectId(userId) as any;
-    if (!team.members.some(m => m.toString() === userId)) {
+    const callerUser = await this.userModel.findById(callerUserId);
+    const isSuperAdmin = callerUser?.roles?.includes(UserRole.SUPER_ADMIN);
+    const isCaptain = team.captainUserId?.toString() === callerUserId;
+    if (!isCaptain && !isSuperAdmin) {
+      const org = await this.orgModel.findById(team.organizationId);
+      if (org) {
+        await this.assertOrgAdmin(org, callerUserId);
+      } else {
+        throw new ForbiddenException('You do not have permission to add members to this team.');
+      }
+    }
+
+    const userObjId = new Types.ObjectId(targetUserId) as any;
+    if (!team.members.some(m => m.toString() === targetUserId)) {
       team.members.push(userObjId);
       await team.save();
     }

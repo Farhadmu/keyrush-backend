@@ -12,9 +12,17 @@ import { Session, SessionSchema } from './schemas/session.schema';
 @Module({
   imports: [
     PassportModule.register({ defaultStrategy: 'jwt' }),
-    JwtModule.register({
-      secret: process.env.JWT_SECRET || 'keyrush_jwt_secret_dev_key_2026',
-      signOptions: { expiresIn: '15m' },
+    JwtModule.registerAsync({
+      useFactory: () => {
+        const secret = process.env.JWT_SECRET;
+        if (!secret && process.env.NODE_ENV === 'production') {
+          throw new Error('CRITICAL: JWT_SECRET missing in production');
+        }
+        return {
+          secret: secret || 'keyrush_jwt_secret_dev_key_2026',
+          signOptions: { expiresIn: '15m' },
+        };
+      },
     }),
     MongooseModule.forFeature([
       { name: User.name, schema: UserSchema },

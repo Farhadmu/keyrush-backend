@@ -2,6 +2,7 @@ import {
   Injectable,
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   NotFoundException,
   Logger,
 } from '@nestjs/common';
@@ -27,6 +28,7 @@ export class CompetitionsService {
   }
 
   private async seedInitialCompetitions() {
+    if (process.env.NODE_ENV === 'production') return;
     try {
       const count = await this.compModel.countDocuments();
       if (count === 0) {
@@ -149,13 +151,26 @@ export class CompetitionsService {
       throw new ConflictException('You are already registered for this competition.');
     }
 
-    if (comp.currentParticipantCount >= comp.settings.maxParticipants) {
+    // Atomic capacity reservation preventing high-concurrency overbooking
+    const updatedComp = await this.compModel.findOneAndUpdate(
+      {
+        _id: comp._id,
+        status: CompetitionStatus.REGISTRATION_OPEN,
+        currentParticipantCount: { $lt: comp.settings.maxParticipants },
+      },
+      {
+        $inc: { currentParticipantCount: 1 },
+      },
+      { new: true },
+    );
+
+    if (!updatedComp) {
       throw new BadRequestException(
         `Event registration is full. Capacity reached: ${comp.settings.maxParticipants} / 300.`,
       );
     }
 
-    const nextSeed = comp.currentParticipantCount + 1;
+    const nextSeed = updatedComp.currentParticipantCount;
     const registration = new this.regModel({
       competitionId: comp._id,
       userId: new Types.ObjectId(user.userId),
@@ -163,21 +178,27 @@ export class CompetitionsService {
       seedNumber: nextSeed,
       status: 'CONFIRMED',
     });
-    await registration.save();
 
-    comp.currentParticipantCount += 1;
-    if (comp.currentParticipantCount >= comp.settings.maxParticipants) {
-      comp.status = CompetitionStatus.REGISTRATION_CLOSED;
+    try {
+      await registration.save();
+    } catch (err: any) {
+      // Rollback atomic counter on unique index violation
+      await this.compModel.findByIdAndUpdate(comp._id, { $inc: { currentParticipantCount: -1 } });
+      throw new ConflictException('You are already registered for this competition.');
     }
-    await comp.save();
+
+    if (updatedComp.currentParticipantCount >= updatedComp.settings.maxParticipants) {
+      updatedComp.status = CompetitionStatus.REGISTRATION_CLOSED;
+      await updatedComp.save();
+    }
 
     return {
       success: true,
       message: 'Successfully registered for competition.',
       registration,
-      currentParticipantCount: comp.currentParticipantCount,
-      minRequired: comp.settings.minParticipants,
-      maxAllowed: comp.settings.maxParticipants,
+      currentParticipantCount: updatedComp.currentParticipantCount,
+      minRequired: updatedComp.settings.minParticipants,
+      maxAllowed: updatedComp.settings.maxParticipants,
     };
   }
 
@@ -185,12 +206,23 @@ export class CompetitionsService {
     return this.regModel.find({ competitionId: new Types.ObjectId(competitionId), status: 'CONFIRMED' }).sort({ seedNumber: 1 });
   }
 
+  async assertCompetitionAdmin(comp: CompetitionDocument, userId?: string, roles: string[] = []): Promise<void> {
+    if (!userId) return;
+    if (roles.includes('SUPER_ADMIN') || roles.includes('COMPETITION_ADMIN')) return;
+    if (comp.organizerId && comp.organizerId.toString() === userId) return;
+    throw new ForbiddenException('You do not have permission to manage this competition.');
+  }
+
   // -------------------------------------------------------------
   // Tournament Bracket Engine (Single Elimination / Double / Swiss)
   // -------------------------------------------------------------
-  async generateTournamentBracket(competitionId: string) {
+  async generateTournamentBracket(competitionId: string, caller?: { userId: string; roles: string[] }) {
     const comp = await this.compModel.findById(competitionId);
     if (!comp) throw new NotFoundException('Competition not found');
+
+    if (caller) {
+      await this.assertCompetitionAdmin(comp, caller.userId, caller.roles);
+    }
 
     const registrations = await this.regModel
       .find({ competitionId: comp._id, status: 'CONFIRMED' })
@@ -207,12 +239,13 @@ export class CompetitionsService {
     // Delete any existing matches for this competition
     await this.matchModel.deleteMany({ competitionId: comp._id });
 
-    // Seeding: 1 vs N, 2 vs N-1 (or standard bracket power of 2)
+    // Seeding: 1 vs N, 2 vs N-1 across power-of-2 tree up to 300 without 256 truncation
     const count = registrations.length;
     let bracketSize = 32;
     if (count > 32 && count <= 64) bracketSize = 64;
     else if (count > 64 && count <= 128) bracketSize = 128;
-    else if (count > 128) bracketSize = 256;
+    else if (count > 128 && count <= 256) bracketSize = 256;
+    else if (count > 256) bracketSize = 512;
 
     const matches: any[] = [];
     const numFirstRoundMatches = bracketSize / 2;
@@ -270,9 +303,17 @@ export class CompetitionsService {
     player1Score: number,
     player2Score: number,
     winnerUserId: string,
+    caller?: { userId: string; roles: string[] },
   ) {
     const match = await this.matchModel.findById(matchId);
     if (!match) throw new NotFoundException('Match not found');
+
+    if (caller) {
+      const comp = await this.compModel.findById(match.competitionId);
+      if (comp) {
+        await this.assertCompetitionAdmin(comp, caller.userId, caller.roles);
+      }
+    }
 
     match.player1.score = player1Score;
     match.player2.score = player2Score;
@@ -287,11 +328,21 @@ export class CompetitionsService {
   }
 
   // -------------------------------------------------------------
-  // Digital Certificate Issuance & Verification
+  // Digital Certificate Cryptographic Issuance & Verification
   // -------------------------------------------------------------
-  async issueCertificates(competitionId: string) {
+  async issueCertificates(competitionId: string, caller?: { userId: string; roles: string[] }) {
     const comp = await this.compModel.findById(competitionId);
     if (!comp) throw new NotFoundException('Competition not found');
+
+    if (caller) {
+      await this.assertCompetitionAdmin(comp, caller.userId, caller.roles);
+    }
+
+    const signingSecret = process.env.CERTIFICATE_SIGNING_SECRET || process.env.JWT_SECRET || 'keyrush_cert_sign_secret_key_2026!';
+    const completedMatches = await this.matchModel
+      .find({ competitionId: comp._id, status: MatchStatus.COMPLETED })
+      .sort({ roundNumber: -1 })
+      .exec();
 
     const registrations = await this.regModel.find({ competitionId: comp._id, status: 'CONFIRMED' }).limit(3);
     const issuedCerts: CertificateDocument[] = [];
@@ -301,8 +352,25 @@ export class CompetitionsService {
     for (let i = 0; i < registrations.length; i++) {
       const reg = registrations[i];
       const certId = `KR-CERT-${Date.now().toString(36).toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`;
-      const verificationPayload = `${certId}|${comp._id}|${reg.userId}|${ranks[i]}`;
-      const verificationHash = crypto.createHash('sha256').update(verificationPayload).digest('hex');
+      
+      let bestWpm = 85;
+      let accuracy = 97.5;
+      if (completedMatches.length > 0) {
+        const userMatch = completedMatches.find(
+          m => m.winnerId?.toString() === reg.userId.toString() ||
+               m.player1?.userId?.toString() === reg.userId.toString() ||
+               m.player2?.userId?.toString() === reg.userId.toString(),
+        );
+        if (userMatch) {
+          const isP1 = userMatch.player1?.userId?.toString() === reg.userId.toString();
+          bestWpm = isP1 ? (userMatch.player1?.score || 85) : (userMatch.player2?.score || 85);
+          accuracy = isP1 ? (userMatch.player1?.accuracy || 97.5) : (userMatch.player2?.accuracy || 97.5);
+        }
+      }
+
+      const achievementRank = ranks[i] || 'HONORABLE FINALIST';
+      const verificationPayload = `${certId}|${comp._id}|${reg.userId}|${achievementRank}|${bestWpm}|${accuracy}`;
+      const verificationHash = crypto.createHmac('sha256', signingSecret).update(verificationPayload).digest('hex');
 
       const cert = new this.certModel({
         certificateId: certId,
@@ -310,9 +378,9 @@ export class CompetitionsService {
         competitionTitle: comp.title,
         userId: reg.userId,
         recipientName: reg.username,
-        achievementRank: ranks[i] || 'HONORABLE FINALIST',
-        bestWpm: 95 - i * 5,
-        accuracy: 98.5 - i * 0.5,
+        achievementRank,
+        bestWpm,
+        accuracy,
         issueDate: new Date(),
         verificationHash,
       });
@@ -329,10 +397,34 @@ export class CompetitionsService {
   async verifyCertificate(certificateId: string) {
     const cert = await this.certModel.findOne({ certificateId }).exec();
     if (!cert) throw new NotFoundException('Certificate not found or invalid ID.');
+
+    if (cert.isRevoked) {
+      return {
+        isValid: false,
+        certificate: cert,
+        status: 'REVOKED',
+        reason: cert.revocationReason || 'Certificate has been revoked by competition authority.',
+      };
+    }
+
+    const signingSecret = process.env.CERTIFICATE_SIGNING_SECRET || process.env.JWT_SECRET || 'keyrush_cert_sign_secret_key_2026!';
+    const expectedPayload = `${cert.certificateId}|${cert.competitionId}|${cert.userId}|${cert.achievementRank}|${cert.bestWpm}|${cert.accuracy}`;
+    const expectedHash = crypto.createHmac('sha256', signingSecret).update(expectedPayload).digest('hex');
+
+    const isValidSignature = cert.verificationHash === expectedHash;
+    if (!isValidSignature) {
+      return {
+        isValid: false,
+        certificate: cert,
+        status: 'TAMPERED_INVALID_SIGNATURE',
+        message: 'Security Alert: Cryptographic signature mismatch. Record has been altered.',
+      };
+    }
+
     return {
-      isValid: !cert.isRevoked,
+      isValid: true,
       certificate: cert,
-      status: cert.isRevoked ? 'REVOKED' : 'VERIFIED_AUTHENTIC',
+      status: 'VERIFIED_AUTHENTIC',
     };
   }
 

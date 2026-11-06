@@ -35,3 +35,4 @@ export class Team {
 
 export const TeamSchema = SchemaFactory.createForClass(Team);
 TeamSchema.index({ organizationId: 1, name: 1 }, { unique: true });
+

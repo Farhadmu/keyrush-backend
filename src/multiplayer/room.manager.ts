@@ -50,6 +50,7 @@ export interface RoomParticipant {
   suspicionReason: string;
   lastWpm: number;
   lastUpdateTimestamp: number;
+  lastSequenceNumber?: number;
 }
 
 export interface MultiplayerRoom {
@@ -92,35 +93,40 @@ export class RoomManager {
     private readonly redisService: RedisService,
     private readonly aiService: AiService,
   ) {
-    this.seedDefaultPublicRooms();
+    this.seedDefaultPublicRooms().catch(() => {});
   }
 
   private async seedDefaultPublicRooms() {
-    const passage = await this.typingService.getRandomPassage('EN');
-    const roomId = 'ROOM-NEON-1';
-    this.rooms.set(roomId, {
-      roomId,
-      name: 'Cyber Tarmac Sprint',
-      isPrivate: false,
-      hostUserId: 'system_host',
-      minPlayers: 2,
-      maxPlayers: 7,
-      state: RoomState.WAITING,
-      passage: {
-        id: (passage as any)?._id?.toString() || 'pass_default_1',
-        title: passage.title,
-        content: passage.content,
-        wordCount: passage.wordCount,
-        charCount: passage.content.length,
-      },
-      participants: new Map(),
-      spectators: new Set(),
-      countdownSeconds: 5,
-      raceStartedAt: null,
-      createdAt: new Date(),
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-      replaySnapshots: [],
-    });
+    try {
+      const passage = await this.typingService.getRandomPassage('EN');
+      if (!passage || !passage.content) return;
+      const roomId = 'ROOM-NEON-1';
+      this.rooms.set(roomId, {
+        roomId,
+        name: 'Cyber Tarmac Sprint',
+        isPrivate: false,
+        hostUserId: 'system_host',
+        minPlayers: 2,
+        maxPlayers: 7,
+        state: RoomState.WAITING,
+        passage: {
+          id: (passage as any)?._id?.toString() || 'pass_default_1',
+          title: passage.title || 'Cyber Tarmac',
+          content: passage.content,
+          wordCount: passage.wordCount || 10,
+          charCount: passage.content.length,
+        },
+        participants: new Map(),
+        spectators: new Set(),
+        countdownSeconds: 5,
+        raceStartedAt: null,
+        createdAt: new Date(),
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        replaySnapshots: [],
+      });
+    } catch (err: any) {
+      this.logger.warn(`Could not seed default public room: ${err.message}`);
+    }
   }
 
   async createRoom(
@@ -249,44 +255,81 @@ export class RoomManager {
       throw new BadRequestException(`Room has reached maximum capacity of ${room.maxPlayers} players.`);
     }
 
-    const reconnectToken = crypto.randomBytes(16).toString('hex');
-    const participant: RoomParticipant = {
-      userId: user.userId,
-      username: user.username,
-      socketId,
-      isGuest: false,
-      isReady: false,
-      carId,
-      joinedAt: new Date(),
-      reconnectToken,
-      typedIndex: 0,
-      errorCount: 0,
-      rawInputCount: 0,
-      streak: 0,
-      nitroActive: false,
-      nitroEndsAt: 0,
-      progressPercent: 0,
-      netWpm: 0,
-      rawWpm: 0,
-      accuracy: 100,
-      speed: 20,
-      rankPosition: 0,
-      finished: false,
-      finishTimeMs: 0,
-      disconnectedAt: null,
-      isFlaggedSuspicious: false,
-      suspicionReason: '',
-      lastWpm: 0,
-      lastUpdateTimestamp: Date.now(),
-    };
+    // Distributed room lock to prevent concurrent overflow past max capacity
+    const lockKey = `keyrush:lock:room:${roomId}`;
+    if (this.redisService?.acquireLock) {
+      await this.redisService.acquireLock(lockKey, 3000);
+    }
 
-    room.participants.set(user.userId, participant);
-    this.userActiveRoom.set(user.userId, roomId);
+    try {
+      if (room.participants.size >= room.maxPlayers) {
+        throw new BadRequestException(`Room has reached maximum capacity of ${room.maxPlayers} players.`);
+      }
 
-    // Redis active player lock (10 minutes TTL)
-    await this.redisService.set(`keyrush:lock:user:${user.userId}`, roomId, 600);
+      const reconnectToken = crypto.randomBytes(16).toString('hex');
+      const participant: RoomParticipant = {
+        userId: user.userId,
+        username: user.username,
+        socketId,
+        isGuest: false,
+        isReady: false,
+        carId,
+        joinedAt: new Date(),
+        reconnectToken,
+        typedIndex: 0,
+        errorCount: 0,
+        rawInputCount: 0,
+        streak: 0,
+        nitroActive: false,
+        nitroEndsAt: 0,
+        progressPercent: 0,
+        netWpm: 0,
+        rawWpm: 0,
+        accuracy: 100,
+        speed: 20,
+        rankPosition: 0,
+        finished: false,
+        finishTimeMs: 0,
+        disconnectedAt: null,
+        isFlaggedSuspicious: false,
+        suspicionReason: '',
+        lastWpm: 0,
+        lastUpdateTimestamp: Date.now(),
+        lastSequenceNumber: 0,
+      };
 
-    return { room, participant };
+      room.participants.set(user.userId, participant);
+      this.userActiveRoom.set(user.userId, roomId);
+
+      // Redis active player lock (10 minutes TTL)
+      if (this.redisService?.set) {
+        await this.redisService.set(`keyrush:lock:user:${user.userId}`, roomId, 600);
+      }
+      await this.syncRoomToRedis(room);
+
+      return { room, participant };
+    } finally {
+      if (this.redisService?.releaseLock) {
+        await this.redisService.releaseLock(lockKey);
+      }
+    }
+  }
+
+  private async syncRoomToRedis(room: MultiplayerRoom) {
+    try {
+      const summary = {
+        roomId: room.roomId,
+        name: room.name,
+        hostUserId: room.hostUserId,
+        minPlayers: room.minPlayers,
+        maxPlayers: room.maxPlayers,
+        state: room.state,
+        participantCount: room.participants.size,
+        raceStartedAt: room.raceStartedAt,
+      };
+      await this.redisService.set(`keyrush:room:${room.roomId}`, JSON.stringify(summary), 3600);
+      await this.redisService.sadd('keyrush:active_rooms', room.roomId);
+    } catch (e) {}
   }
 
   // Handle Spectators (Observer pattern)
@@ -377,9 +420,12 @@ export class RoomManager {
     roomId: string,
     userId: string,
     telemetry: {
-      typedIndex: number;
-      errorCount: number;
-      rawInputCount: number;
+      textBuffer?: string;
+      typedIndex?: number;
+      errorCount?: number;
+      rawInputCount?: number;
+      sequenceNumber?: number;
+      clientTimestamp?: number;
     },
   ): { participant: RoomParticipant; raceFinished: boolean } {
     const room = this.rooms.get(roomId);
@@ -392,22 +438,58 @@ export class RoomManager {
       return { participant: p || (null as any), raceFinished: false };
     }
 
+    // Sequence Monotonicity & Replay Protection
+    if (telemetry.sequenceNumber !== undefined) {
+      if (p.lastSequenceNumber !== undefined && telemetry.sequenceNumber <= p.lastSequenceNumber) {
+        // Replayed packet or out-of-order drop: ignore duplicate
+        return { participant: p, raceFinished: false };
+      }
+      p.lastSequenceNumber = telemetry.sequenceNumber;
+    }
+
     const now = Date.now();
-    const elapsedSeconds = room.raceStartedAt ? Math.max((now - room.raceStartedAt) / 1000, 0.1) : 0.1;
+    const elapsedSeconds = room.raceStartedAt ? Math.max((now - room.raceStartedAt) / 1000, 0.5) : 0.5;
 
-    const passageLength = room.passage.charCount;
-    const safeTypedIndex = Math.min(Math.max(telemetry.typedIndex, p.typedIndex), passageLength);
-    const errors = Math.max(telemetry.errorCount, p.errorCount);
-    const rawInputs = Math.max(telemetry.rawInputCount, safeTypedIndex + errors);
+    const expectedText = (room.passage.content || '').normalize('NFC');
+    const passageLength = expectedText.length;
 
-    const indexAdvance = safeTypedIndex - p.typedIndex;
-    if (indexAdvance > 0 && errors === p.errorCount) {
+    let correctChars = 0;
+    let errors = 0;
+    let rawInputs = 0;
+
+    if (telemetry.textBuffer !== undefined) {
+      // -------------------------------------------------------------
+      // Server-Authoritative Character Matching against Official Passage
+      // -------------------------------------------------------------
+      const submitted = (telemetry.textBuffer || '').normalize('NFC');
+      const minLen = Math.min(submitted.length, passageLength);
+
+      for (let i = 0; i < minLen; i++) {
+        if (submitted[i] === expectedText[i]) {
+          correctChars++;
+        } else {
+          break; // First character divergence halts valid progression
+        }
+      }
+
+      errors = Math.max(0, submitted.length - correctChars);
+      rawInputs = Math.max(p.rawInputCount, submitted.length);
+    } else {
+      // If client attempts to advance without providing textBuffer,
+      // strictly do NOT trust forged forward progress!
+      correctChars = p.typedIndex;
+      errors = p.errorCount;
+      rawInputs = p.rawInputCount;
+    }
+
+    const indexAdvance = correctChars - p.typedIndex;
+    if (indexAdvance > 0 && errors === 0) {
       p.streak += indexAdvance;
       if (p.streak >= 25 && !p.nitroActive) {
         p.nitroActive = true;
         p.nitroEndsAt = now + 3000;
       }
-    } else if (errors > p.errorCount) {
+    } else if (errors > 0) {
       p.streak = 0;
     }
 
@@ -415,12 +497,13 @@ export class RoomManager {
       p.nitroActive = false;
     }
 
-    const metrics = this.typingService.calculateMetrics(rawInputs, safeTypedIndex, elapsedSeconds);
+    // Calculations computed 100% on the server
+    const metrics = this.typingService.calculateMetrics(rawInputs, correctChars, elapsedSeconds);
     const speed = this.racingService.calculateVehicleSpeed(metrics.netWpm, metrics.accuracy, p.nitroActive);
-    const progressPercent = Number(((safeTypedIndex / passageLength) * 100).toFixed(1));
+    const progressPercent = Number(((correctChars / passageLength) * 100).toFixed(1));
 
-    // Anti-Cheat Anomaly Check
-    const timeDeltaSeconds = Math.max((now - p.lastUpdateTimestamp) / 1000, 0.1);
+    // Anti-Cheat Anomaly Check (Cadence & Acceleration)
+    const timeDeltaSeconds = Math.max((now - p.lastUpdateTimestamp) / 1000, 0.05);
     const wpmDelta = Math.abs(metrics.netWpm - p.lastWpm) / timeDeltaSeconds;
     const anomaly = this.aiService.analyzeTelemetryAnomaly({
       rawWpm: metrics.rawWpm,
@@ -438,7 +521,7 @@ export class RoomManager {
     p.lastWpm = metrics.netWpm;
     p.lastUpdateTimestamp = now;
 
-    p.typedIndex = safeTypedIndex;
+    p.typedIndex = correctChars;
     p.errorCount = errors;
     p.rawInputCount = rawInputs;
     p.rawWpm = metrics.rawWpm;
@@ -447,7 +530,8 @@ export class RoomManager {
     p.speed = speed;
     p.progressPercent = Math.min(progressPercent, 100);
 
-    if (safeTypedIndex >= passageLength && !p.finished) {
+    // Only allow finishing if ALL characters match the official passage
+    if (correctChars >= passageLength && !p.finished) {
       p.finished = true;
       p.finishTimeMs = now - (room.raceStartedAt || now);
       p.progressPercent = 100;

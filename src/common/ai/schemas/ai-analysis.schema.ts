@@ -34,3 +34,4 @@ export class AiAnalysis {
 
 export const AiAnalysisSchema = SchemaFactory.createForClass(AiAnalysis);
 AiAnalysisSchema.index({ userId: 1, type: 1, createdAt: -1 });
+

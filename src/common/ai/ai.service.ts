@@ -69,11 +69,11 @@ export class AiService {
       type: AiAnalysisType.COACHING,
       inputMetrics: { sessionsAnalyzed: recentSessions.length, avgWpm, avgAcc },
       result,
-      provider: 'HEURISTIC_ENGINE',
+      provider: 'DETERMINISTIC_HEURISTIC_FALLBACK',
     });
     await record.save();
 
-    return result;
+    return { ...result, provider: 'DETERMINISTIC_HEURISTIC_FALLBACK' };
   }
 
   // -------------------------------------------------------------
@@ -108,11 +108,11 @@ export class AiService {
       type: AiAnalysisType.WEAKNESS_DETECTION,
       inputMetrics: keyMissMap,
       result,
-      provider: 'HEURISTIC_ENGINE',
+      provider: 'DETERMINISTIC_HEURISTIC_FALLBACK',
     });
     await record.save();
 
-    return result;
+    return { ...result, provider: 'DETERMINISTIC_HEURISTIC_FALLBACK' };
   }
 
   // -------------------------------------------------------------
@@ -143,11 +143,11 @@ export class AiService {
       type: AiAnalysisType.PRACTICE_PLAN,
       inputMetrics: { currentLevel, avgWpm },
       result: plan,
-      provider: 'HEURISTIC_ENGINE',
+      provider: 'DETERMINISTIC_HEURISTIC_FALLBACK',
     });
     await record.save();
 
-    return plan;
+    return { ...plan, provider: 'DETERMINISTIC_HEURISTIC_FALLBACK' };
   }
 
   // -------------------------------------------------------------
@@ -241,3 +241,4 @@ export class AiService {
     return { isSuspicious: false, reason: 'Clean telemetry', confidence: 0.1 };
   }
 }
+

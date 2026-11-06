@@ -32,6 +32,10 @@ describe('Absolute Game Rule 3.1: Multiplayer Room Capacity Limits (2-7 Players)
       set: jest.fn().mockResolvedValue(undefined),
       get: jest.fn().mockResolvedValue(null),
       del: jest.fn().mockResolvedValue(undefined),
+      acquireLock: jest.fn().mockResolvedValue(true),
+      releaseLock: jest.fn().mockResolvedValue(true),
+      sadd: jest.fn().mockResolvedValue(1),
+      srem: jest.fn().mockResolvedValue(1),
     };
     aiService = {
       analyzeTelemetryAnomaly: jest.fn().mockReturnValue({ isSuspicious: false }),

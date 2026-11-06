@@ -77,6 +77,56 @@ export class AuthService {
     return isMatch;
   }
 
+  // -------------------------------------------------------------
+  // Token & Cryptographic Key Helpers
+  // -------------------------------------------------------------
+  private getJwtSecret(): string {
+    const s = process.env.JWT_SECRET;
+    if (!s && process.env.NODE_ENV === 'production') {
+      throw new Error('JWT_SECRET is missing in production');
+    }
+    return s || 'keyrush_jwt_secret_dev_key_2026';
+  }
+
+  private getJwtRefreshSecret(): string {
+    const s = process.env.JWT_REFRESH_SECRET;
+    if (!s && process.env.NODE_ENV === 'production') {
+      throw new Error('JWT_REFRESH_SECRET is missing in production');
+    }
+    return s || 'keyrush_refresh_secret_key_2026';
+  }
+
+  private getEncryptionKey(): Buffer {
+    const secret = process.env.TOTP_ENCRYPTION_KEY || process.env.JWT_SECRET || 'dev_totp_secret_key_32bytes_long!';
+    return crypto.createHash('sha256').update(secret).digest();
+  }
+
+  private encryptSecret(plainText: string): string {
+    if (!plainText) return plainText;
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', this.getEncryptionKey(), iv);
+    let encrypted = cipher.update(plainText, 'utf8', 'hex');
+    encrypted += cipher.final('hex');
+    const authTag = cipher.getAuthTag().toString('hex');
+    return `${iv.toString('hex')}:${encrypted}:${authTag}`;
+  }
+
+  private decryptSecret(cipherText: string): string {
+    if (!cipherText) return cipherText;
+    const parts = cipherText.split(':');
+    if (parts.length !== 3) return cipherText;
+    const [ivHex, encHex, tagHex] = parts;
+    try {
+      const decipher = crypto.createDecipheriv('aes-256-gcm', this.getEncryptionKey(), Buffer.from(ivHex, 'hex'));
+      decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
+      let decrypted = decipher.update(encHex, 'hex', 'utf8');
+      decrypted += decipher.final('utf8');
+      return decrypted;
+    } catch {
+      return cipherText;
+    }
+  }
+
   private hashToken(token: string): string {
     return crypto.createHash('sha256').update(token).digest('hex');
   }
@@ -224,7 +274,8 @@ export class AuthService {
           message: 'Two-factor authentication code required.',
         };
       }
-      const isValid2Fa = this.verifyTotpCode(user.twoFactorSecret, dto.twoFactorCode, user.twoFactorBackupCodes);
+      const decryptedSecret = this.decryptSecret(user.twoFactorSecret);
+      const isValid2Fa = this.verifyTotpCode(decryptedSecret, dto.twoFactorCode, user.twoFactorBackupCodes);
       if (!isValid2Fa) {
         throw new UnauthorizedException('Invalid two-factor authentication code or backup code.');
       }
@@ -276,7 +327,7 @@ export class AuthService {
     let payload: any;
     try {
       payload = this.jwtService.verify(refreshToken, {
-        secret: process.env.JWT_REFRESH_SECRET || 'keyrush_refresh_secret_key_2026',
+        secret: this.getJwtRefreshSecret(),
       });
     } catch (err) {
       throw new UnauthorizedException('Invalid or expired refresh token');
@@ -477,7 +528,8 @@ export class AuthService {
     const secret = crypto.randomBytes(20).toString('hex');
     const backupCodes = Array.from({ length: 8 }, () => crypto.randomBytes(4).toString('hex').toUpperCase());
 
-    user.twoFactorSecret = secret;
+    // Encrypt TOTP secret at rest with AES-256-GCM
+    user.twoFactorSecret = this.encryptSecret(secret);
     user.twoFactorBackupCodes = backupCodes;
     await user.save();
 
@@ -493,7 +545,8 @@ export class AuthService {
     const user = await this.userModel.findById(userId);
     if (!user || !user.twoFactorSecret) throw new BadRequestException('2FA setup not initiated');
 
-    const isValid = this.verifyTotpCode(user.twoFactorSecret, code, []);
+    const decryptedSecret = this.decryptSecret(user.twoFactorSecret);
+    const isValid = this.verifyTotpCode(decryptedSecret, code, []);
     if (!isValid) throw new BadRequestException('Invalid authentication code');
 
     user.twoFactorEnabled = true;
@@ -574,7 +627,7 @@ export class AuthService {
     });
 
     const refreshToken = this.jwtService.sign(payload, {
-      secret: process.env.JWT_REFRESH_SECRET || 'keyrush_refresh_secret_key_2026',
+      secret: this.getJwtRefreshSecret(),
       expiresIn: process.env.JWT_REFRESH_EXPIRATION || '7d',
     });
 

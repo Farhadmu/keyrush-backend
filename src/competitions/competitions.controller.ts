@@ -62,8 +62,11 @@ export class CompetitionsController {
 
   @UseGuards(JwtAuthGuard)
   @Post(':id/bracket/generate')
-  generateBracket(@Param('id') id: string) {
-    return this.competitionsService.generateTournamentBracket(id);
+  generateBracket(
+    @Param('id') id: string,
+    @CurrentUser() user: any,
+  ) {
+    return this.competitionsService.generateTournamentBracket(id, user);
   }
 
   @Get(':id/bracket')
@@ -75,6 +78,7 @@ export class CompetitionsController {
   @Patch('matches/:matchId/score')
   updateMatchScore(
     @Param('matchId') matchId: string,
+    @CurrentUser() user: any,
     @Body() body: { player1Score: number; player2Score: number; winnerUserId: string },
   ) {
     return this.competitionsService.updateMatchResult(
@@ -82,12 +86,16 @@ export class CompetitionsController {
       body.player1Score,
       body.player2Score,
       body.winnerUserId,
+      user,
     );
   }
 
   @UseGuards(JwtAuthGuard)
   @Post(':id/certificates/issue')
-  issueCertificates(@Param('id') id: string) {
-    return this.competitionsService.issueCertificates(id);
+  issueCertificates(
+    @Param('id') id: string,
+    @CurrentUser() user: any,
+  ) {
+    return this.competitionsService.issueCertificates(id, user);
   }
 }

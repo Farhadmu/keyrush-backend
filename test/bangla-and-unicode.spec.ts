@@ -35,3 +35,4 @@ describe('Phase 2 & 12: Unicode & Bangla IME Composition Typing Tests', () => {
     expect(metrics.accuracy).toBe(90.0);
   });
 });
+

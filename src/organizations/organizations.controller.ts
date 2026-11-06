@@ -93,8 +93,9 @@ export class OrganizationsController {
   @Post('teams/:teamId/members')
   addTeamMember(
     @Param('teamId') teamId: string,
-    @Body('userId') userId: string,
+    @CurrentUser('userId') callerUserId: string,
+    @Body('userId') targetUserId: string,
   ) {
-    return this.orgsService.addTeamMember(teamId, userId);
+    return this.orgsService.addTeamMember(teamId, callerUserId, targetUserId);
   }
 }

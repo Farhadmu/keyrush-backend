@@ -71,3 +71,4 @@ export class TournamentMatch {
 
 export const TournamentMatchSchema = SchemaFactory.createForClass(TournamentMatch);
 TournamentMatchSchema.index({ competitionId: 1, roundNumber: 1, matchNumber: 1 });
+

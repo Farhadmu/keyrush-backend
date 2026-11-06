@@ -30,3 +30,4 @@ export class Session {
 export const SessionSchema = SchemaFactory.createForClass(Session);
 SessionSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 }); // TTL index for automatic cleanup
 SessionSchema.index({ userId: 1, isRevoked: 1 });
+
