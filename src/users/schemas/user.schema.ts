@@ -1,18 +1,9 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
+import { UserRole } from '../../auth/roles.enum';
+export { UserRole };
 
 export type UserDocument = User & Document;
-
-export enum UserRole {
-  GUEST = 'GUEST',
-  PLAYER = 'PLAYER',
-  TEAM_CAPTAIN = 'TEAM_CAPTAIN',
-  ORGANIZATION_ADMIN = 'ORGANIZATION_ADMIN',
-  ORGANIZATION_MODERATOR = 'ORGANIZATION_MODERATOR',
-  COMPETITION_ADMIN = 'COMPETITION_ADMIN',
-  PLATFORM_MODERATOR = 'PLATFORM_MODERATOR',
-  SUPER_ADMIN = 'SUPER_ADMIN',
-}
 
 export enum UserStatus {
   ACTIVE = 'ACTIVE',

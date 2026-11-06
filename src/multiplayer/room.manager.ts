@@ -97,31 +97,39 @@ export class RoomManager {
   }
 
   private async seedDefaultPublicRooms() {
-    const passage = await this.typingService.getRandomPassage('EN');
-    const roomId = 'ROOM-NEON-1';
-    this.rooms.set(roomId, {
-      roomId,
-      name: 'Cyber Tarmac Sprint',
-      isPrivate: false,
-      hostUserId: 'system_host',
-      minPlayers: 2,
-      maxPlayers: 7,
-      state: RoomState.WAITING,
-      passage: {
-        id: (passage as any)?._id?.toString() || 'pass_default_1',
-        title: passage.title,
-        content: passage.content,
-        wordCount: passage.wordCount,
-        charCount: passage.content.length,
-      },
-      participants: new Map(),
-      spectators: new Set(),
-      countdownSeconds: 5,
-      raceStartedAt: null,
-      createdAt: new Date(),
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-      replaySnapshots: [],
-    });
+    try {
+      const passage = await this.typingService.getRandomPassage('EN');
+      const roomId = 'ROOM-NEON-1';
+      const content = passage?.content || 'Accelerate through the digital highway of the typing grid at maximum speed.';
+      const title = passage?.title || 'Cyber Tarmac Sprint';
+      const wordCount = passage?.wordCount || 12;
+
+      this.rooms.set(roomId, {
+        roomId,
+        name: 'Cyber Tarmac Sprint',
+        isPrivate: false,
+        hostUserId: 'system_host',
+        minPlayers: 2,
+        maxPlayers: 7,
+        state: RoomState.WAITING,
+        passage: {
+          id: (passage as any)?._id?.toString() || 'pass_default_1',
+          title,
+          content,
+          wordCount,
+          charCount: content.length,
+        },
+        participants: new Map(),
+        spectators: new Set(),
+        countdownSeconds: 5,
+        raceStartedAt: null,
+        createdAt: new Date(),
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        replaySnapshots: [],
+      });
+    } catch (err: any) {
+      this.logger.warn(`Could not seed default public room: ${err.message}`);
+    }
   }
 
   async createRoom(

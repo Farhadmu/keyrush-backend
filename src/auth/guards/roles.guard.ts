@@ -1,13 +1,15 @@
 import { Injectable, CanActivate, ExecutionContext, ForbiddenException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { ROLES_KEY } from '../decorators/roles.decorator';
-import { UserRole } from '../../users/schemas/user.schema';
+import { UserRole, normalizeRole } from '../roles.enum';
 
 const ROLE_HIERARCHY: Record<string, number> = {
   [UserRole.GUEST]: 0,
+  [UserRole.USER]: 10,
   [UserRole.PLAYER]: 10,
   [UserRole.TEAM_CAPTAIN]: 20,
   [UserRole.ORGANIZATION_MODERATOR]: 30,
+  [UserRole.ORGANIZER]: 40,
   [UserRole.ORGANIZATION_ADMIN]: 40,
   [UserRole.COMPETITION_ADMIN]: 50,
   [UserRole.PLATFORM_MODERATOR]: 60,
@@ -35,20 +37,23 @@ export class RolesGuard implements CanActivate {
     }
 
     // Super Admin bypasses all checks
-    if (user.roles.includes(UserRole.SUPER_ADMIN)) {
+    if (user.roles.includes(UserRole.SUPER_ADMIN) || user.roles.map(normalizeRole).includes(UserRole.SUPER_ADMIN)) {
       return true;
     }
 
-    // Direct role match
+    // Direct role match or canonical match
+    const userCanonicalRoles = user.roles.map((r: string) => normalizeRole(r));
+    const requiredCanonicalRoles = requiredRoles.map((r) => normalizeRole(r));
+
     const hasDirectRole = requiredRoles.some((role) => user.roles.includes(role));
-    if (hasDirectRole) return true;
+    const hasCanonicalRole = requiredCanonicalRoles.some((role) => userCanonicalRoles.includes(role));
+    if (hasDirectRole || hasCanonicalRole) return true;
 
     // Hierarchy check: Find user's highest role level
     const userMaxLevel = Math.max(...user.roles.map((r: string) => ROLE_HIERARCHY[r] || 0));
     const minRequiredLevel = Math.min(...requiredRoles.map((r) => ROLE_HIERARCHY[r] || 100));
 
     if (userMaxLevel >= minRequiredLevel && minRequiredLevel <= 20) {
-      // Allow hierarchical escalation up to TEAM_CAPTAIN for general PLAYER tasks
       return true;
     }
 

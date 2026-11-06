@@ -30,6 +30,39 @@ export class LeaderboardsService {
         country: user?.country || 'BD',
         level: p.level,
         rankTier: p.rank,
+        eloRating: p.eloRating || 1000,
+        eloTier: p.eloTier || 'BRONZE',
+        bestWpm: p.stats.bestWpm,
+        averageWpm: p.stats.averageWpm,
+        accuracy: p.stats.averageAccuracy,
+        totalRaces: p.stats.totalRaces,
+        wins: p.stats.wins,
+        winRate,
+        selectedCarId: p.selectedCarId,
+      };
+    });
+  }
+
+  async getRankedLeaderboard(limit: number = 50) {
+    const profiles = await this.profileModel
+      .find()
+      .populate('userId', 'username country languagePreference')
+      .sort({ eloRating: -1, 'stats.wins': -1 })
+      .limit(limit);
+
+    return profiles.map((p, index) => {
+      const user = p.userId as any;
+      const winRate = p.stats.totalRaces > 0
+        ? Math.round((p.stats.wins / p.stats.totalRaces) * 100)
+        : 0;
+
+      return {
+        rank: index + 1,
+        username: user?.username || p.displayName || 'Racer',
+        country: user?.country || 'BD',
+        level: p.level,
+        eloRating: p.eloRating || 1000,
+        eloTier: p.eloTier || 'BRONZE',
         bestWpm: p.stats.bestWpm,
         averageWpm: p.stats.averageWpm,
         accuracy: p.stats.averageAccuracy,

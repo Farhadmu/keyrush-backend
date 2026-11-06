@@ -50,6 +50,15 @@ export class Profile {
   @Prop({ default: 'ROOKIE', enum: ['ROOKIE', 'RACER', 'PRO', 'ELITE', 'GRANDMASTER'] })
   rank: string;
 
+  @Prop({ default: 1000 })
+  eloRating: number;
+
+  @Prop({ default: 'BRONZE', enum: ['BRONZE', 'SILVER', 'GOLD', 'PLATINUM', 'DIAMOND', 'MASTER', 'GRANDMASTER'] })
+  eloTier: string;
+
+  @Prop({ type: [String], default: ['car_cyber_phantom'] })
+  unlockedCars: string[];
+
   @Prop({ default: 'car_cyber_phantom' })
   selectedCarId: string;
 

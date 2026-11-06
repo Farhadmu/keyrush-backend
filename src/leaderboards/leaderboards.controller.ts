@@ -11,6 +11,12 @@ export class LeaderboardsController {
     return this.leaderboardsService.getGlobalLeaderboard(lim);
   }
 
+  @Get('ranked')
+  async getRanked(@Query('limit') limit?: string) {
+    const lim = limit ? parseInt(limit, 10) : 50;
+    return this.leaderboardsService.getRankedLeaderboard(lim);
+  }
+
   @Get('country')
   async getCountry(@Query('country') country?: string, @Query('limit') limit?: string) {
     const lim = limit ? parseInt(limit, 10) : 50;

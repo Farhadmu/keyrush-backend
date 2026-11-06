@@ -14,7 +14,7 @@ export class TypingPassage {
   @Prop({ default: 'EN', enum: ['EN', 'BN'] })
   language: string;
 
-  @Prop({ default: 'MEDIUM', enum: ['BEGINNER', 'INTERMEDIATE', 'ADVANCED', 'EXPERT'] })
+  @Prop({ default: 'MEDIUM', enum: ['BEGINNER', 'INTERMEDIATE', 'MEDIUM', 'ADVANCED', 'EXPERT'] })
   difficulty: string;
 
   @Prop({ required: true })

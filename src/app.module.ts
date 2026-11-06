@@ -14,6 +14,7 @@ import { CompetitionsModule } from './competitions/competitions.module';
 import { EventHeatsModule } from './event-heats/event-heats.module';
 import { OrganizationsModule } from './organizations/organizations.module';
 import { LeaderboardsModule } from './leaderboards/leaderboards.module';
+import { EconomyModule } from './economy/economy.module';
 import { HealthModule } from './health/health.module';
 
 @Module({
@@ -39,6 +40,7 @@ import { HealthModule } from './health/health.module';
     EventHeatsModule,
     OrganizationsModule,
     LeaderboardsModule,
+    EconomyModule,
   ],
   providers: [
     {
