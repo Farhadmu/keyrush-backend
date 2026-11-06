@@ -93,40 +93,35 @@ export class RoomManager {
     private readonly redisService: RedisService,
     private readonly aiService: AiService,
   ) {
-    this.seedDefaultPublicRooms().catch(() => {});
+    this.seedDefaultPublicRooms();
   }
 
   private async seedDefaultPublicRooms() {
-    try {
-      const passage = await this.typingService.getRandomPassage('EN');
-      if (!passage || !passage.content) return;
-      const roomId = 'ROOM-NEON-1';
-      this.rooms.set(roomId, {
-        roomId,
-        name: 'Cyber Tarmac Sprint',
-        isPrivate: false,
-        hostUserId: 'system_host',
-        minPlayers: 2,
-        maxPlayers: 7,
-        state: RoomState.WAITING,
-        passage: {
-          id: (passage as any)?._id?.toString() || 'pass_default_1',
-          title: passage.title || 'Cyber Tarmac',
-          content: passage.content,
-          wordCount: passage.wordCount || 10,
-          charCount: passage.content.length,
-        },
-        participants: new Map(),
-        spectators: new Set(),
-        countdownSeconds: 5,
-        raceStartedAt: null,
-        createdAt: new Date(),
-        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-        replaySnapshots: [],
-      });
-    } catch (err: any) {
-      this.logger.warn(`Could not seed default public room: ${err.message}`);
-    }
+    const passage = await this.typingService.getRandomPassage('EN');
+    const roomId = 'ROOM-NEON-1';
+    this.rooms.set(roomId, {
+      roomId,
+      name: 'Cyber Tarmac Sprint',
+      isPrivate: false,
+      hostUserId: 'system_host',
+      minPlayers: 2,
+      maxPlayers: 7,
+      state: RoomState.WAITING,
+      passage: {
+        id: (passage as any)?._id?.toString() || 'pass_default_1',
+        title: passage.title,
+        content: passage.content,
+        wordCount: passage.wordCount,
+        charCount: passage.content.length,
+      },
+      participants: new Map(),
+      spectators: new Set(),
+      countdownSeconds: 5,
+      raceStartedAt: null,
+      createdAt: new Date(),
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      replaySnapshots: [],
+    });
   }
 
   async createRoom(
@@ -186,11 +181,52 @@ export class RoomManager {
     };
 
     this.rooms.set(roomId, room);
+    await this.syncRoomToRedis(room);
     return room;
   }
 
-  getPublicRooms(): any[] {
+  async getRoomOrHydrate(roomId: string, forceFresh: boolean = false): Promise<MultiplayerRoom | undefined> {
+    let room = this.rooms.get(roomId);
+    if ((!room || forceFresh) && this.redisService?.get) {
+      try {
+        const raw = await this.redisService.get(`keyrush:room:${roomId}`);
+        if (raw) {
+          const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          if (room) {
+            // Update existing in-memory room without breaking object reference
+            room.participants = new Map(parsed.participants || []);
+            room.spectators = new Set(parsed.spectators || []);
+          } else {
+            room = {
+              ...parsed,
+              createdAt: new Date(parsed.createdAt || Date.now()),
+              expiresAt: new Date(parsed.expiresAt || Date.now() + 3600000),
+              participants: new Map(parsed.participants || []),
+              spectators: new Set(parsed.spectators || []),
+            };
+            this.rooms.set(roomId, room);
+          }
+        }
+      } catch (err: any) {
+        this.logger.warn(`Could not hydrate room ${roomId} from Redis: ${err.message}`);
+      }
+    }
+    return room;
+  }
+
+  async getPublicRooms(): Promise<any[]> {
     const list: any[] = [];
+    if (this.redisService?.smembers) {
+      try {
+        const activeIds = await this.redisService.smembers('keyrush:active_rooms');
+        if (Array.isArray(activeIds)) {
+          for (const id of activeIds) {
+            await this.getRoomOrHydrate(id);
+          }
+        }
+      } catch (e) {}
+    }
+
     for (const [_, room] of this.rooms.entries()) {
       if (!room.isPrivate && room.state !== RoomState.FINISHED && room.state !== RoomState.CANCELLED) {
         list.push({
@@ -224,7 +260,7 @@ export class RoomManager {
       throw new ForbiddenException('Guest users cannot enter multiplayer rooms. Please register or log in.');
     }
 
-    const room = this.rooms.get(roomId);
+    let room = await this.getRoomOrHydrate(roomId);
     if (!room) {
       throw new NotFoundException(`Room ${roomId} not found.`);
     }
@@ -238,14 +274,15 @@ export class RoomManager {
       const existing = room.participants.get(user.userId)!;
       existing.socketId = socketId;
       existing.disconnectedAt = null;
+      await this.syncRoomToRedis(room);
       return { room, participant: existing };
     }
 
     // Multi-room check
-    const currentRoomId = this.userActiveRoom.get(user.userId);
-    if (currentRoomId && currentRoomId !== roomId) {
-      const activeRoom = this.rooms.get(currentRoomId);
-      if (activeRoom && activeRoom.state === RoomState.IN_PROGRESS) {
+    const activeRoomId = (this.redisService?.get ? await this.redisService.get(`keyrush:lock:user:${user.userId}`) : null) || this.userActiveRoom.get(user.userId);
+    if (activeRoomId && activeRoomId !== roomId) {
+      const activeRoom = await this.getRoomOrHydrate(activeRoomId);
+      if (activeRoom && (activeRoom.state === RoomState.IN_PROGRESS || activeRoom.state === RoomState.COUNTDOWN)) {
         throw new BadRequestException('Player is already in an active race in another room.');
       }
     }
@@ -258,10 +295,17 @@ export class RoomManager {
     // Distributed room lock to prevent concurrent overflow past max capacity
     const lockKey = `keyrush:lock:room:${roomId}`;
     if (this.redisService?.acquireLock) {
-      await this.redisService.acquireLock(lockKey, 3000);
+      const locked = await this.redisService.acquireLock(lockKey, 3000);
+      if (!locked && process.env.NODE_ENV === 'production') {
+        throw new BadRequestException('Could not acquire room lock. Please try again.');
+      }
     }
 
     try {
+      // Re-hydrate within lock to get fresh participants from other instances
+      const freshRoom = await this.getRoomOrHydrate(roomId, true);
+      if (freshRoom) room = freshRoom;
+
       if (room.participants.size >= room.maxPlayers) {
         throw new BadRequestException(`Room has reached maximum capacity of ${room.maxPlayers} players.`);
       }
@@ -302,34 +346,43 @@ export class RoomManager {
       this.userActiveRoom.set(user.userId, roomId);
 
       // Redis active player lock (10 minutes TTL)
-      if (this.redisService?.set) {
-        await this.redisService.set(`keyrush:lock:user:${user.userId}`, roomId, 600);
-      }
+      await this.redisService.set(`keyrush:lock:user:${user.userId}`, roomId, 600);
       await this.syncRoomToRedis(room);
 
       return { room, participant };
     } finally {
-      if (this.redisService?.releaseLock) {
-        await this.redisService.releaseLock(lockKey);
-      }
+      await this.redisService.releaseLock(lockKey);
     }
   }
 
-  private async syncRoomToRedis(room: MultiplayerRoom) {
+  async syncRoomToRedis(room: MultiplayerRoom) {
+    if (!this.redisService?.set) return;
     try {
-      const summary = {
+      const serializableRoom = {
         roomId: room.roomId,
         name: room.name,
+        isPrivate: room.isPrivate,
+        passcode: room.passcode,
         hostUserId: room.hostUserId,
         minPlayers: room.minPlayers,
         maxPlayers: room.maxPlayers,
         state: room.state,
-        participantCount: room.participants.size,
+        passage: room.passage,
+        participants: Array.from(room.participants.entries()),
+        spectators: Array.from(room.spectators),
+        countdownSeconds: room.countdownSeconds,
         raceStartedAt: room.raceStartedAt,
+        createdAt: room.createdAt,
+        expiresAt: room.expiresAt,
+        replaySnapshots: room.replaySnapshots,
       };
-      await this.redisService.set(`keyrush:room:${room.roomId}`, JSON.stringify(summary), 3600);
-      await this.redisService.sadd('keyrush:active_rooms', room.roomId);
-    } catch (e) {}
+      await this.redisService.set(`keyrush:room:${room.roomId}`, JSON.stringify(serializableRoom), 3600);
+      if (this.redisService?.sadd) {
+        await this.redisService.sadd('keyrush:active_rooms', room.roomId);
+      }
+    } catch (e: any) {
+      this.logger.warn(`Could not sync room ${room.roomId} to Redis: ${e.message}`);
+    }
   }
 
   // Handle Spectators (Observer pattern)
@@ -353,7 +406,7 @@ export class RoomManager {
 
     room.participants.delete(userId);
     this.userActiveRoom.delete(userId);
-    this.redisService.del(`keyrush:lock:user:${userId}`).catch(() => {});
+    this.redisService.del(`keyrush:lock:user:${userId}`).catch(() => { });
 
     if (room.hostUserId === userId && room.participants.size > 0) {
       const nextUser = room.participants.keys().next().value;
@@ -365,6 +418,7 @@ export class RoomManager {
       room.countdownSeconds = 5;
     }
 
+    this.syncRoomToRedis(room).catch(() => {});
     return { room, remainingCount: room.participants.size };
   }
 
@@ -379,13 +433,13 @@ export class RoomManager {
     return p;
   }
 
-  reconnectPlayer(
+  async reconnectPlayer(
     roomId: string,
     userId: string,
     reconnectToken: string,
     newSocketId: string,
-  ): { room: MultiplayerRoom; participant: RoomParticipant } {
-    const room = this.rooms.get(roomId);
+  ): Promise<{ room: MultiplayerRoom; participant: RoomParticipant }> {
+    let room = await this.getRoomOrHydrate(roomId, true);
     if (!room) throw new NotFoundException('Room not found');
     const p = room.participants.get(userId);
     if (!p) throw new NotFoundException('Player not in room');
@@ -396,6 +450,7 @@ export class RoomManager {
 
     p.socketId = newSocketId;
     p.disconnectedAt = null;
+    await this.syncRoomToRedis(room);
     return { room, participant: p };
   }
 
@@ -412,6 +467,7 @@ export class RoomManager {
     const allReady = Array.from(room.participants.values()).every(p => p.isReady);
     const canStart = participantCount >= 2 && participantCount <= 7 && allReady;
 
+    this.syncRoomToRedis(room).catch(() => {});
     return { room, canStart };
   }
 
@@ -570,6 +626,7 @@ export class RoomManager {
       this.persistFinishedRace(room);
     }
 
+    this.syncRoomToRedis(room).catch(() => {});
     return { participant: p, raceFinished: allFinished };
   }
 
@@ -603,10 +660,13 @@ export class RoomManager {
         replaySnapshots: room.replaySnapshots,
       });
 
-      // Release player locks
+      // Release player locks and active room index
+      if (this.redisService?.srem) {
+        this.redisService.srem('keyrush:active_rooms', room.roomId).catch(() => {});
+      }
       for (const p of participants) {
         this.userActiveRoom.delete(p.userId);
-        this.redisService.del(`keyrush:lock:user:${p.userId}`).catch(() => {});
+        this.redisService.del(`keyrush:lock:user:${p.userId}`).catch(() => { });
       }
     } catch (err: any) {
       this.logger.error(`Error saving finished race ${room.roomId}: ${err.message}`);

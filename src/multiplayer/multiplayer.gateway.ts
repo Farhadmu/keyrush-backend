@@ -207,7 +207,7 @@ export class MultiplayerGateway implements OnGatewayConnection, OnGatewayDisconn
   }
 
   @SubscribeMessage('race:reconnect')
-  handleReconnect(
+  async handleReconnect(
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { roomId: string; userId: string; reconnectToken: string },
   ) {
@@ -218,7 +218,7 @@ export class MultiplayerGateway implements OnGatewayConnection, OnGatewayDisconn
         this.disconnectGraceTimers.delete(timerKey);
       }
 
-      const { room, participant } = this.roomManager.reconnectPlayer(
+      const { room, participant } = await this.roomManager.reconnectPlayer(
         data.roomId,
         data.userId,
         data.reconnectToken,

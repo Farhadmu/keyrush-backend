@@ -248,8 +248,10 @@ export class CompetitionsService {
     else if (count > 256) bracketSize = 512;
 
     const matches: any[] = [];
+    const totalRounds = Math.log2(bracketSize);
     const numFirstRoundMatches = bracketSize / 2;
 
+    // Generate Round 1 matches
     for (let i = 0; i < numFirstRoundMatches; i++) {
       const p1Reg = registrations[i];
       const p2Reg = registrations[bracketSize - 1 - i];
@@ -265,6 +267,11 @@ export class CompetitionsService {
       const isBye = !p1Reg || !p2Reg;
       const winnerId = isBye ? (p1Reg ? p1Reg.userId : (p2Reg ? p2Reg.userId : null)) : null;
 
+      if (isBye) {
+        if (p1Reg) player1.isWinner = true;
+        if (p2Reg) player2.isWinner = true;
+      }
+
       matches.push({
         competitionId: comp._id,
         roundNumber: 1,
@@ -276,6 +283,63 @@ export class CompetitionsService {
         status: isBye ? MatchStatus.BYE : MatchStatus.SCHEDULED,
         scheduledTime: new Date(comp.eventStart || Date.now()),
       });
+    }
+
+    // Generate subsequent rounds up to the Grand Final
+    for (let round = 2; round <= totalRounds; round++) {
+      const matchesInRound = bracketSize / Math.pow(2, round);
+      let roundName = `Round of ${bracketSize / Math.pow(2, round - 1)}`;
+      if (round === totalRounds) roundName = 'Grand Final';
+      else if (round === totalRounds - 1) roundName = 'Semifinals';
+      else if (round === totalRounds - 2) roundName = 'Quarterfinals';
+
+      for (let m = 1; m <= matchesInRound; m++) {
+        matches.push({
+          competitionId: comp._id,
+          roundNumber: round,
+          matchNumber: m,
+          roundName,
+          player1: { userId: null, username: 'TBD', seed: 0, score: 0, accuracy: 0, isWinner: false },
+          player2: { userId: null, username: 'TBD', seed: 0, score: 0, accuracy: 0, isWinner: false },
+          winnerId: null,
+          status: MatchStatus.SCHEDULED,
+          scheduledTime: new Date(comp.eventStart || Date.now()),
+        });
+      }
+    }
+
+    // Advance Round 1 BYE winners into Round 2 slots
+    for (let i = 0; i < numFirstRoundMatches; i++) {
+      const m1 = matches[i];
+      if (m1.status === MatchStatus.BYE && m1.winnerId) {
+        const winner = m1.player1.isWinner ? m1.player1 : m1.player2;
+        const r2MatchIndex = numFirstRoundMatches + Math.floor(i / 2);
+        const targetMatch = matches[r2MatchIndex];
+        if (targetMatch) {
+          if (i % 2 === 0) {
+            targetMatch.player1 = {
+              userId: winner.userId,
+              username: winner.username,
+              seed: winner.seed,
+              score: 0,
+              accuracy: 0,
+              isWinner: false,
+            };
+          } else {
+            targetMatch.player2 = {
+              userId: winner.userId,
+              username: winner.username,
+              seed: winner.seed,
+              score: 0,
+              accuracy: 0,
+              isWinner: false,
+            };
+          }
+          if (targetMatch.player1?.userId && targetMatch.player2?.userId) {
+            targetMatch.status = MatchStatus.READY;
+          }
+        }
+      }
     }
 
     const createdMatches = await this.matchModel.insertMany(matches);
@@ -302,11 +366,15 @@ export class CompetitionsService {
     matchId: string,
     player1Score: number,
     player2Score: number,
-    winnerUserId: string,
+    winnerUserId?: string,
     caller?: { userId: string; roles: string[] },
   ) {
     const match = await this.matchModel.findById(matchId);
     if (!match) throw new NotFoundException('Match not found');
+
+    if (match.status === MatchStatus.COMPLETED && (!caller || !caller.roles.includes('SUPER_ADMIN'))) {
+      throw new BadRequestException('Match is already completed. Duplicate score recording prevented.');
+    }
 
     if (caller) {
       const comp = await this.compModel.findById(match.competitionId);
@@ -315,16 +383,113 @@ export class CompetitionsService {
       }
     }
 
+    // Tie-break resolution
+    let resolvedWinnerId = winnerUserId;
+    if (player1Score === player2Score) {
+      if (!resolvedWinnerId) {
+        if (match.player1.accuracy > match.player2.accuracy) {
+          resolvedWinnerId = match.player1.userId?.toString();
+        } else if (match.player2.accuracy > match.player1.accuracy) {
+          resolvedWinnerId = match.player2.userId?.toString();
+        } else {
+          throw new BadRequestException('Scores are tied. Please provide an explicit winner or tie-break accuracy.');
+        }
+      }
+    } else {
+      resolvedWinnerId = resolvedWinnerId || (player1Score > player2Score ? match.player1.userId?.toString() : match.player2.userId?.toString());
+    }
+
     match.player1.score = player1Score;
     match.player2.score = player2Score;
-    match.winnerId = new Types.ObjectId(winnerUserId) as any;
-    match.player1.isWinner = match.player1.userId?.toString() === winnerUserId;
-    match.player2.isWinner = match.player2.userId?.toString() === winnerUserId;
+    match.winnerId = (resolvedWinnerId && Types.ObjectId.isValid(resolvedWinnerId) ? new Types.ObjectId(resolvedWinnerId) : resolvedWinnerId) as any;
+    match.player1.isWinner = match.player1.userId?.toString() === resolvedWinnerId;
+    match.player2.isWinner = match.player2.userId?.toString() === resolvedWinnerId;
     match.status = MatchStatus.COMPLETED;
     match.completedAt = new Date();
     await match.save();
 
+    // Advance winner to the next round match
+    const winningPlayer = match.player1.isWinner ? match.player1 : match.player2;
+    const nextRoundNumber = match.roundNumber + 1;
+    const nextMatchNumber = Math.ceil(match.matchNumber / 2);
+    const isSlot1 = match.matchNumber % 2 !== 0;
+
+    const nextMatch = await this.matchModel.findOne({
+      competitionId: match.competitionId,
+      roundNumber: nextRoundNumber,
+      matchNumber: nextMatchNumber,
+    });
+
+    if (nextMatch) {
+      if (isSlot1) {
+        nextMatch.player1 = {
+          userId: winningPlayer.userId,
+          username: winningPlayer.username,
+          seed: winningPlayer.seed,
+          score: 0,
+          accuracy: 0,
+          isWinner: false,
+        };
+      } else {
+        nextMatch.player2 = {
+          userId: winningPlayer.userId,
+          username: winningPlayer.username,
+          seed: winningPlayer.seed,
+          score: 0,
+          accuracy: 0,
+          isWinner: false,
+        };
+      }
+      if (nextMatch.player1?.userId && nextMatch.player2?.userId) {
+        nextMatch.status = MatchStatus.READY;
+      }
+      await nextMatch.save();
+    } else {
+      // Grand Final concluded! Mark competition as completed
+      await this.compModel.findByIdAndUpdate(match.competitionId, {
+        status: CompetitionStatus.COMPLETED,
+      });
+    }
+
     return match;
+  }
+
+  // -------------------------------------------------------------
+  // Registration Cancellation & Capacity Release
+  // -------------------------------------------------------------
+  async cancelRegistration(competitionId: string, userId: string) {
+    const comp = await this.compModel.findById(competitionId);
+    if (!comp) throw new NotFoundException('Competition not found');
+
+    if (comp.status !== CompetitionStatus.REGISTRATION_OPEN && comp.status !== CompetitionStatus.REGISTRATION_CLOSED) {
+      throw new BadRequestException('Cannot cancel registration: Tournament is already in progress or completed.');
+    }
+
+    const registration = await this.regModel.findOne({
+      competitionId: comp._id,
+      userId: Types.ObjectId.isValid(userId) ? new Types.ObjectId(userId) : userId,
+    });
+
+    if (!registration) {
+      throw new NotFoundException('Registration record not found.');
+    }
+
+    await this.regModel.deleteOne({ _id: registration._id });
+
+    const updatedComp = await this.compModel.findByIdAndUpdate(
+      comp._id,
+      {
+        $inc: { currentParticipantCount: -1 },
+        $set: { status: CompetitionStatus.REGISTRATION_OPEN },
+      },
+      { new: true },
+    );
+
+    return {
+      success: true,
+      message: 'Registration successfully cancelled and capacity released.',
+      currentParticipantCount: updatedComp?.currentParticipantCount || 0,
+    };
   }
 
   // -------------------------------------------------------------

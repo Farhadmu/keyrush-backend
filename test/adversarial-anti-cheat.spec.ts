@@ -163,5 +163,89 @@ describe('Adversarial Anti-Cheat & Telemetry Verification', () => {
     expect(participant.finishTimeMs).toBeGreaterThan(0);
     expect(participant.accuracy).toBe(100);
   });
+
+  it('ADVERSARIAL: Reconnection cannot restore forged progress and maintains exact server state', async () => {
+    const hostUser = { userId: 'racer_reconn', username: 'ReconnectTester', roles: ['PLAYER'] };
+    const room = await roomManager.createRoom(hostUser, { maxPlayers: 2 });
+    const { participant: p1 } = await roomManager.joinRoom(room.roomId, hostUser, 'sock_orig');
+
+    room.state = RoomState.IN_PROGRESS;
+    room.raceStartedAt = Date.now() - 5000;
+
+    // Type 9 characters legitimately ("The quick")
+    roomManager.updatePlayerTyping(room.roomId, 'racer_reconn', {
+      textBuffer: 'The quick',
+      sequenceNumber: 1,
+      clientTimestamp: Date.now(),
+    });
+
+    expect(p1.typedIndex).toBe(9);
+
+    // Racer disconnects
+    roomManager.markPlayerDisconnected(room.roomId, 'racer_reconn');
+
+    // Racer reconnects with token - reconnect does not accept client-provided progress
+    const { participant: restored } = await roomManager.reconnectPlayer(
+      room.roomId,
+      'racer_reconn',
+      p1.reconnectToken,
+      'sock_new',
+    );
+
+    // Typed index must remain exactly 9 as persisted on the server
+    expect(restored.typedIndex).toBe(9);
+    expect(restored.socketId).toBe('sock_new');
+    expect(restored.disconnectedAt).toBeNull();
+  });
+
+  it('RECOVERY: Dropped packet recovery via monotonic sequence number and cumulative buffer', async () => {
+    const hostUser = { userId: 'racer_drop', username: 'PacketDropTester', roles: ['PLAYER'] };
+    const room = await roomManager.createRoom(hostUser, { maxPlayers: 2 });
+    await roomManager.joinRoom(room.roomId, hostUser, 'sock_1');
+
+    room.state = RoomState.IN_PROGRESS;
+    room.raceStartedAt = Date.now() - 4000;
+
+    // Packet 1 (sequence 1): "The "
+    const res1 = roomManager.updatePlayerTyping(room.roomId, 'racer_drop', {
+      textBuffer: 'The ',
+      sequenceNumber: 1,
+    });
+    expect(res1.participant.typedIndex).toBe(4);
+
+    // Packet 2 (sequence 2) is DROPPED in transit over the network.
+    // Packet 3 (sequence 3) arrives with cumulative buffer "The quick brown "
+    const res3 = roomManager.updatePlayerTyping(room.roomId, 'racer_drop', {
+      textBuffer: 'The quick brown ',
+      sequenceNumber: 3,
+    });
+
+    // Monotonic advance immediately catches up to 16 characters
+    expect(res3.participant.typedIndex).toBe(16);
+    expect(res3.participant.errorCount).toBe(0);
+  });
+
+  it('ANTI-CHEAT: Speed anomaly flags telemetry for human review without automatically banning or kicking player', async () => {
+    const hostUser = { userId: 'racer_bot', username: 'SpeedDemonBot', roles: ['PLAYER'] };
+    const room = await roomManager.createRoom(hostUser, { maxPlayers: 2 });
+    await roomManager.joinRoom(room.roomId, hostUser, 'sock_1');
+
+    room.state = RoomState.IN_PROGRESS;
+    room.raceStartedAt = Date.now() - 1000;
+
+    // Instant typing burst triggering anomaly detector (> 240 WPM / extreme jump)
+    const { participant } = roomManager.updatePlayerTyping(room.roomId, 'racer_bot', {
+      textBuffer: 'The quick brown fox jumps over the lazy dog.',
+      sequenceNumber: 1,
+    });
+
+    // Must be flagged as suspicious in telemetry
+    expect(participant.isFlaggedSuspicious).toBe(true);
+    expect(participant.suspicionReason).toBeDefined();
+
+    // Player is NOT banned or kicked; race continues for human review
+    expect(participant.finished).toBe(true);
+    expect(room.participants.has('racer_bot')).toBe(true);
+  });
 });
 

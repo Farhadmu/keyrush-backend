@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Post,
+  Delete,
   Body,
   Param,
   Query,
@@ -58,6 +59,15 @@ export class CompetitionsController {
     @CurrentUser() user: any,
   ) {
     return this.competitionsService.registerParticipant(id, user);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Delete(':id/register')
+  cancelRegistration(
+    @Param('id') id: string,
+    @CurrentUser() user: any,
+  ) {
+    return this.competitionsService.cancelRegistration(id, user.userId);
   }
 
   @UseGuards(JwtAuthGuard)
