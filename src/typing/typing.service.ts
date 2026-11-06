@@ -114,8 +114,106 @@ export class TypingService implements OnModuleInit {
     return (input || '').normalize('NFC');
   }
 
-  async getRandomPassage(language: string = 'EN', difficulty?: string): Promise<TypingPassageDocument> {
-    const query: any = { language: language.toUpperCase() };
+  generatePassage(language: string = 'EN', targetWords: number = 50): { title: string; content: string; wordCount: number; language: string; difficulty: string } {
+    const isBn = language.toUpperCase() === 'BN';
+    const enSentences = [
+      'The cybernetic racing machines lined up along the starting grid with engines roaring.',
+      'Neon light reflected across the polished carbon fiber chassis of the high-speed vehicles.',
+      'Every keystroke transmitted electric impulse signals directly into the hyper-drive transmission.',
+      'Mastering keystroke rhythm and timing separates casual drivers from elite esports champions.',
+      'The digital track curved sharply through towering skyscrapers glowing under the midnight sky.',
+      'Nitro boosters ignited with a blast of plasma, propelling the racer past the competition.',
+      'Precision accuracy is the ultimate weapon on this circuit where split seconds dictate victory.',
+      'Advanced telemetry showed peak acceleration as the vehicle crossed the hundred mile threshold.',
+      'Crowds of spectators cheered from the holographic grandstands overlooking the finish arch.',
+      'The checkered flag waved in triumph as the champion racer sealed another legendary lap record.',
+      'Strategic typing discipline ensures that speed increases without sacrificing accuracy or control.',
+      'Downshifts and throttle control are synchronized flawlessly with rapid mechanical keystrokes.',
+      'Aerodynamic spoilers generated downforce to keep the vehicle stabilized through the neon hairpin.',
+      'Tactical racers monitor their streak meters closely to unleash continuous nitro propulsion.',
+      'The journey from a rookie driver to a grandmaster esports racer demands relentless dedication.'
+    ];
+
+    const bnSentences = [
+      'পদ্মা মেঘনা যমুনা ও সুরমা নদীর কলতানে মুখরিত আমাদের এই রূপসী সোনার বাংলাদেশ।',
+      'সবুজ শ্যামল প্রান্তর আর সোনালী ধানের শীষে দখিনা বাতাসের মিষ্টি পরশ ছড়িয়ে পড়ে।',
+      'ডিজিটাল যুগে তরুণ প্রজন্মের মেধা ও উদ্ভাবনী শক্তি দেশকে বিশ্বমঞ্চে অনন্য উচ্চতায় পৌঁছে দিচ্ছে।',
+      'দ্রুত ও নির্ভুল টাইপিং দক্ষতা আজকের আধুনিক তথ্যপ্রযুক্তির যুগে এক অপরিহার্য শক্তি।',
+      'সাইবার স্পিডওয়েতে প্রতিটি নির্ভুল অক্ষরের ছোঁয়ায় গাড়ির গতি বিদ্যুৎ বেগে বৃদ্ধি পেতে থাকে।',
+      'পরিশ্রম, একাগ্রতা এবং নিয়মিত অনুশীলনই একজন সাধারণ প্রতিযোগী থেকে গ্র্যান্ডমাস্টার করে তোলে।',
+      'ঐতিহাসিক ভাষা আন্দোলনের রক্তস্নাত চেতনা আমাদের মাতৃভাষাকে বিশ্বদরবারে গৌরবান্বিত করেছে।',
+      'প্রযুক্তির নতুন দিগন্তে কৃত্রিম বুদ্ধিমত্তা ও মহাকাশ বিজ্ঞান মানবজাতিকে এগিয়ে নিয়ে চলেছে।',
+      'গতির লড়াইয়ে বিজয়ী হতে হলে ক্ষিপ্রতার সাথে সাথে নিখুঁত মনোযোগ বজায় রাখা আবশ্যক।',
+      'শেষ দাগ অতিক্রম করার মুহূর্তে বিজয়ীর আনন্দ পুরো রেসিং ট্র্যাকে এক উৎসবের আবহ তৈরি করে।'
+    ];
+
+    const pool = isBn ? bnSentences : enSentences;
+    let assembled = '';
+    let currentWords = 0;
+    let index = Math.floor(Math.random() * pool.length);
+
+    while (currentWords < targetWords) {
+      const sentence = pool[index % pool.length];
+      assembled = assembled ? `${assembled} ${sentence}` : sentence;
+      currentWords = assembled.trim().split(/\s+/).length;
+      index++;
+      if (currentWords >= targetWords) break;
+    }
+
+    const words = assembled.trim().split(/\s+/);
+    const finalWords = words.slice(0, Math.max(10, targetWords));
+    const finalContent = finalWords.join(' ');
+    const count = finalWords.length;
+
+    const diff = count <= 35 ? 'EASY' : count <= 75 ? 'MEDIUM' : count <= 150 ? 'ADVANCED' : 'EXPERT';
+    const titlesEn = ['Neon Velocity Circuit', 'Cyber Grand Prix', 'Quantum Horizon', 'Apex Hyperdrive', 'Endurance Cup'];
+    const titlesBn = ['রূপসী বাঙলা সার্কিট', 'সাইবার স্পিড গ্রাঁ প্রি', 'ডিজিটাল বিপ্লব ট্র‍্যাক', 'মহাকাশ অভিযান কাপ'];
+
+    const title = isBn 
+      ? titlesBn[Math.floor(Math.random() * titlesBn.length)] 
+      : titlesEn[Math.floor(Math.random() * titlesEn.length)];
+
+    return {
+      title: `${title} (${count} Words)`,
+      content: finalContent,
+      wordCount: count,
+      language: language.toUpperCase(),
+      difficulty: diff,
+    };
+  }
+
+  async getRandomPassage(language: string = 'EN', difficulty?: string, targetWords?: number): Promise<TypingPassageDocument | any> {
+    const lang = language.toUpperCase();
+
+    if (targetWords && targetWords > 0) {
+      try {
+        const matched = await this.passageModel.findOne({
+          language: lang,
+          wordCount: { $gte: targetWords - 10, $lte: targetWords + 10 },
+        });
+        if (matched) return matched;
+
+        const generated = this.generatePassage(lang, targetWords);
+        const saved = await this.passageModel.create({
+          title: generated.title,
+          content: generated.content,
+          language: generated.language,
+          difficulty: generated.difficulty,
+          wordCount: generated.wordCount,
+          category: 'CUSTOM',
+          isPublic: true,
+        });
+        return saved;
+      } catch {
+        const gen = this.generatePassage(lang, targetWords);
+        return {
+          _id: 'gen_' + Date.now(),
+          ...gen,
+        };
+      }
+    }
+
+    const query: any = { language: lang };
     if (difficulty) query.difficulty = difficulty.toUpperCase();
 
     try {
@@ -137,7 +235,7 @@ export class TypingService implements OnModuleInit {
         title: 'Cyber Velocity',
         content: 'Accelerate through the digital highway of the typing grid at maximum speed.',
         wordCount: 12,
-        language: language.toUpperCase(),
+        language: lang,
       } as any;
     }
   }

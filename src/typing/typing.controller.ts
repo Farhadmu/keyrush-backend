@@ -11,8 +11,10 @@ export class TypingController {
   getRandomPassage(
     @Query('language') language?: string,
     @Query('difficulty') difficulty?: string,
+    @Query('wordCount') wordCount?: string,
   ) {
-    return this.typingService.getRandomPassage(language, difficulty);
+    const words = wordCount ? parseInt(wordCount, 10) : undefined;
+    return this.typingService.getRandomPassage(language, difficulty, words);
   }
 
   @Get('passages')
