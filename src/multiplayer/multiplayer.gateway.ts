@@ -15,14 +15,22 @@ import { UsersService } from '../users/users.service';
 @WebSocketGateway({
   cors: {
     origin: (origin, callback) => {
-      const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:3000')
+      if (!origin) return callback(null, true);
+
+      const configured = (process.env.CORS_ORIGIN || '')
         .split(',')
-        .map(o => o.trim())
-        .concat(['http://localhost:3000', 'http://127.0.0.1:3000']);
-      if (!origin || allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+        .map(o => o.trim().replace(/\/$/, ''))
+        .filter(Boolean);
+
+      const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+      const isNetlify = /\.netlify\.app$/.test(origin);
+      const isRender = /\.onrender\.com$/.test(origin);
+      const isConfigured = configured.includes('*') || configured.includes(origin);
+
+      if (isLocalhost || isNetlify || isRender || isConfigured || configured.length === 0) {
         return callback(null, true);
       }
-      return callback(new Error(`WebSocket CORS origin rejected: ${origin}`));
+      return callback(new Error(`WebSocket CORS origin rejected: ${origin}`), false);
     },
     credentials: true,
   },

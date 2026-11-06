@@ -22,24 +22,33 @@ async function bootstrap() {
   // Global exception filter for unified error response formatting and logging
   app.useGlobalFilters(new HttpExceptionFilter());
 
-  // Configure CORS for production cloud frontend and local development
-  const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:3000')
-    .split(',')
-    .map(o => o.trim())
-    .concat(['http://localhost:3000', 'http://127.0.0.1:3000']);
-
+  // Configure CORS for production cloud frontend, Netlify, and local development
   app.enableCors({
     origin: (origin, callback) => {
       // Allow requests with no origin (e.g. mobile apps, curl, server-to-server)
-      if (!origin || allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+      if (!origin) return callback(null, true);
+
+      const configured = (process.env.CORS_ORIGIN || '')
+        .split(',')
+        .map(o => o.trim().replace(/\/$/, ''))
+        .filter(Boolean);
+
+      const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+      const isNetlify = /\.netlify\.app$/.test(origin);
+      const isRender = /\.onrender\.com$/.test(origin);
+      const isConfigured = configured.includes('*') || configured.includes(origin);
+
+      if (isLocalhost || isNetlify || isRender || isConfigured || configured.length === 0) {
         return callback(null, true);
       }
+
       logger.warn(`Blocked CORS request from origin: ${origin}`);
-      return callback(new Error(`CORS origin not allowed: ${origin}`));
+      return callback(null, false);
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+    preflightContinue: false,
+    optionsSuccessStatus: 204,
   });
 
   // Enable validation pipe

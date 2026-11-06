@@ -22,3 +22,4 @@ services:
         value: "*"
       - key: REDIS_URL
         sync: false
+
