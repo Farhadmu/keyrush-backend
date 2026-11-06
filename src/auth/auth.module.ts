@@ -7,6 +7,7 @@ import { AuthController } from './auth.controller';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { User, UserSchema } from '../users/schemas/user.schema';
 import { Profile, ProfileSchema } from '../users/schemas/profile.schema';
+import { Session, SessionSchema } from './schemas/session.schema';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { Profile, ProfileSchema } from '../users/schemas/profile.schema';
     MongooseModule.forFeature([
       { name: User.name, schema: UserSchema },
       { name: Profile.name, schema: ProfileSchema },
+      { name: Session.name, schema: SessionSchema },
     ]),
   ],
   controllers: [AuthController],

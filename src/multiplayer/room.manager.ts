@@ -1,6 +1,15 @@
-import { Injectable, BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+  Logger,
+} from '@nestjs/common';
+import * as crypto from 'crypto';
 import { TypingService } from '../typing/typing.service';
 import { RacingService } from '../racing/racing.service';
+import { RedisService } from '../common/redis/redis.service';
+import { AiService } from '../common/ai/ai.service';
 
 export enum RoomState {
   WAITING = 'WAITING',
@@ -20,6 +29,7 @@ export interface RoomParticipant {
   isReady: boolean;
   carId: string;
   joinedAt: Date;
+  reconnectToken: string;
   // Live race state (server-authoritative)
   typedIndex: number;
   errorCount: number;
@@ -36,6 +46,10 @@ export interface RoomParticipant {
   finished: boolean;
   finishTimeMs: number;
   disconnectedAt: Date | null;
+  isFlaggedSuspicious: boolean;
+  suspicionReason: string;
+  lastWpm: number;
+  lastUpdateTimestamp: number;
 }
 
 export interface MultiplayerRoom {
@@ -55,28 +69,33 @@ export interface MultiplayerRoom {
     charCount: number;
   };
   participants: Map<string, RoomParticipant>; // key: userId
+  spectators: Set<string>; // set of socketIds/userIds (does NOT count towards 2-7 participant limits)
   countdownSeconds: number;
   raceStartedAt: number | null;
   createdAt: Date;
   expiresAt: Date;
+  replaySnapshots: Array<{
+    timeMs: number;
+    positions: Array<{ userId: string; progress: number; wpm: number; speed: number }>;
+  }>;
 }
 
 @Injectable()
 export class RoomManager {
-  // In-memory room store (can be synchronized with Redis in cluster mode)
+  private readonly logger = new Logger(RoomManager.name);
   private rooms: Map<string, MultiplayerRoom> = new Map();
-  // Map of active user -> roomId to prevent simultaneous multi-room participation
   private userActiveRoom: Map<string, string> = new Map();
 
   constructor(
     private readonly typingService: TypingService,
     private readonly racingService: RacingService,
+    private readonly redisService: RedisService,
+    private readonly aiService: AiService,
   ) {
     this.seedDefaultPublicRooms();
   }
 
   private async seedDefaultPublicRooms() {
-    // Seed an initial open public lobby so players can immediately quick match or join
     const passage = await this.typingService.getRandomPassage('EN');
     const roomId = 'ROOM-NEON-1';
     this.rooms.set(roomId, {
@@ -95,10 +114,12 @@ export class RoomManager {
         charCount: passage.content.length,
       },
       participants: new Map(),
+      spectators: new Set(),
       countdownSeconds: 5,
       raceStartedAt: null,
       createdAt: new Date(),
       expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      replaySnapshots: [],
     });
   }
 
@@ -112,7 +133,6 @@ export class RoomManager {
       language?: string;
     },
   ): Promise<MultiplayerRoom> {
-    // Rule 3.1: Only registered and authenticated accounts can participate
     if (!hostUser || hostUser.roles.includes('GUEST')) {
       throw new ForbiddenException('Guest users cannot create multiplayer rooms. Please log in.');
     }
@@ -126,7 +146,6 @@ export class RoomManager {
       }
     }
 
-    // Enforce 2-7 capacity rule
     let max = options.maxPlayers ?? 7;
     if (max < 2 || max > 7) {
       throw new BadRequestException('Room capacity must be between 2 and 7 players.');
@@ -152,10 +171,12 @@ export class RoomManager {
         charCount: passage.content.length,
       },
       participants: new Map(),
+      spectators: new Set(),
       countdownSeconds: 5,
       raceStartedAt: null,
       createdAt: new Date(),
       expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      replaySnapshots: [],
     };
 
     this.rooms.set(roomId, room);
@@ -175,6 +196,7 @@ export class RoomManager {
           maxPlayers: room.maxPlayers,
           state: room.state,
           language: room.passage.title.includes('বাঙলা') ? 'BN' : 'EN',
+          spectatorCount: room.spectators.size,
         });
       }
     }
@@ -185,14 +207,13 @@ export class RoomManager {
     return this.rooms.get(roomId);
   }
 
-  // Joins a player to a room with all mandatory boundary checks
-  joinRoom(
+  // Joins a player with boundary enforcement & Redis lock
+  async joinRoom(
     roomId: string,
     user: { userId: string; username: string; roles: string[] },
     socketId: string,
     carId: string = 'car_cyber_phantom',
-  ): { room: MultiplayerRoom; participant: RoomParticipant } {
-    // Rule 3.1: Guest users cannot enter multiplayer rooms
+  ): Promise<{ room: MultiplayerRoom; participant: RoomParticipant }> {
     if (!user || user.roles.includes('GUEST')) {
       throw new ForbiddenException('Guest users cannot enter multiplayer rooms. Please register or log in.');
     }
@@ -202,21 +223,19 @@ export class RoomManager {
       throw new NotFoundException(`Room ${roomId} not found.`);
     }
 
-    // Disallow joining if race already started or finished
     if (room.state !== RoomState.WAITING && room.state !== RoomState.READY) {
       throw new BadRequestException('Cannot join: Race is already in progress or has concluded.');
     }
 
-    // Check if player is already in this room
+    // Check existing participant for lobby reconnection
     if (room.participants.has(user.userId)) {
-      // Re-link socket if reconnecting in lobby
       const existing = room.participants.get(user.userId)!;
       existing.socketId = socketId;
       existing.disconnectedAt = null;
       return { room, participant: existing };
     }
 
-    // Check if player is participating in another active race
+    // Multi-room check
     const currentRoomId = this.userActiveRoom.get(user.userId);
     if (currentRoomId && currentRoomId !== roomId) {
       const activeRoom = this.rooms.get(currentRoomId);
@@ -225,11 +244,12 @@ export class RoomManager {
       }
     }
 
-    // Rule 3.1: Maximum players is strictly 7 (or room.maxPlayers)
+    // Strict 2-7 capacity check
     if (room.participants.size >= room.maxPlayers) {
       throw new BadRequestException(`Room has reached maximum capacity of ${room.maxPlayers} players.`);
     }
 
+    const reconnectToken = crypto.randomBytes(16).toString('hex');
     const participant: RoomParticipant = {
       userId: user.userId,
       username: user.username,
@@ -238,6 +258,7 @@ export class RoomManager {
       isReady: false,
       carId,
       joinedAt: new Date(),
+      reconnectToken,
       typedIndex: 0,
       errorCount: 0,
       rawInputCount: 0,
@@ -253,12 +274,34 @@ export class RoomManager {
       finished: false,
       finishTimeMs: 0,
       disconnectedAt: null,
+      isFlaggedSuspicious: false,
+      suspicionReason: '',
+      lastWpm: 0,
+      lastUpdateTimestamp: Date.now(),
     };
 
     room.participants.set(user.userId, participant);
     this.userActiveRoom.set(user.userId, roomId);
 
+    // Redis active player lock (10 minutes TTL)
+    await this.redisService.set(`keyrush:lock:user:${user.userId}`, roomId, 600);
+
     return { room, participant };
+  }
+
+  // Handle Spectators (Observer pattern)
+  addSpectator(roomId: string, socketId: string): MultiplayerRoom {
+    const room = this.rooms.get(roomId);
+    if (!room) throw new NotFoundException('Room not found');
+    room.spectators.add(socketId);
+    return room;
+  }
+
+  removeSpectator(roomId: string, socketId: string): void {
+    const room = this.rooms.get(roomId);
+    if (room) {
+      room.spectators.delete(socketId);
+    }
   }
 
   leaveRoom(roomId: string, userId: string): { room: MultiplayerRoom; remainingCount: number } {
@@ -267,20 +310,50 @@ export class RoomManager {
 
     room.participants.delete(userId);
     this.userActiveRoom.delete(userId);
+    this.redisService.del(`keyrush:lock:user:${userId}`).catch(() => {});
 
-    // If host leaves and others remain, assign new host
     if (room.hostUserId === userId && room.participants.size > 0) {
       const nextUser = room.participants.keys().next().value;
       if (nextUser) room.hostUserId = nextUser;
     }
 
-    // If room drops below 2 players while in COUNTDOWN, revert to WAITING
     if (room.participants.size < 2 && room.state === RoomState.COUNTDOWN) {
       room.state = RoomState.WAITING;
       room.countdownSeconds = 5;
     }
 
     return { room, remainingCount: room.participants.size };
+  }
+
+  // Disconnect Grace Period (15s)
+  markPlayerDisconnected(roomId: string, userId: string): RoomParticipant | null {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    const p = room.participants.get(userId);
+    if (!p) return null;
+
+    p.disconnectedAt = new Date();
+    return p;
+  }
+
+  reconnectPlayer(
+    roomId: string,
+    userId: string,
+    reconnectToken: string,
+    newSocketId: string,
+  ): { room: MultiplayerRoom; participant: RoomParticipant } {
+    const room = this.rooms.get(roomId);
+    if (!room) throw new NotFoundException('Room not found');
+    const p = room.participants.get(userId);
+    if (!p) throw new NotFoundException('Player not in room');
+
+    if (p.reconnectToken !== reconnectToken) {
+      throw new ForbiddenException('Invalid reconnection token');
+    }
+
+    p.socketId = newSocketId;
+    p.disconnectedAt = null;
+    return { room, participant: p };
   }
 
   setPlayerReady(roomId: string, userId: string, isReady: boolean): { room: MultiplayerRoom; canStart: boolean } {
@@ -292,7 +365,6 @@ export class RoomManager {
 
     participant.isReady = isReady;
 
-    // Rule 3.1: The race cannot start with fewer than two players
     const participantCount = room.participants.size;
     const allReady = Array.from(room.participants.values()).every(p => p.isReady);
     const canStart = participantCount >= 2 && participantCount <= 7 && allReady;
@@ -300,7 +372,7 @@ export class RoomManager {
     return { room, canStart };
   }
 
-  // Server-authoritative keystroke update
+  // Server-Authoritative Keystroke Update with Anti-Cheat Telemetry
   updatePlayerTyping(
     roomId: string,
     userId: string,
@@ -323,34 +395,48 @@ export class RoomManager {
     const now = Date.now();
     const elapsedSeconds = room.raceStartedAt ? Math.max((now - room.raceStartedAt) / 1000, 0.1) : 0.1;
 
-    // Validate index boundaries
     const passageLength = room.passage.charCount;
     const safeTypedIndex = Math.min(Math.max(telemetry.typedIndex, p.typedIndex), passageLength);
     const errors = Math.max(telemetry.errorCount, p.errorCount);
     const rawInputs = Math.max(telemetry.rawInputCount, safeTypedIndex + errors);
 
-    // Calculate Streak & Nitro
     const indexAdvance = safeTypedIndex - p.typedIndex;
     if (indexAdvance > 0 && errors === p.errorCount) {
       p.streak += indexAdvance;
-      // Trigger Nitro boost on streak >= 25
       if (p.streak >= 25 && !p.nitroActive) {
         p.nitroActive = true;
-        p.nitroEndsAt = now + 3000; // 3-second nitro
+        p.nitroEndsAt = now + 3000;
       }
     } else if (errors > p.errorCount) {
-      p.streak = 0; // reset streak on error
+      p.streak = 0;
     }
 
-    // Check if nitro expired
     if (p.nitroActive && now > p.nitroEndsAt) {
       p.nitroActive = false;
     }
 
-    // Authoritative metrics
     const metrics = this.typingService.calculateMetrics(rawInputs, safeTypedIndex, elapsedSeconds);
     const speed = this.racingService.calculateVehicleSpeed(metrics.netWpm, metrics.accuracy, p.nitroActive);
     const progressPercent = Number(((safeTypedIndex / passageLength) * 100).toFixed(1));
+
+    // Anti-Cheat Anomaly Check
+    const timeDeltaSeconds = Math.max((now - p.lastUpdateTimestamp) / 1000, 0.1);
+    const wpmDelta = Math.abs(metrics.netWpm - p.lastWpm) / timeDeltaSeconds;
+    const anomaly = this.aiService.analyzeTelemetryAnomaly({
+      rawWpm: metrics.rawWpm,
+      netWpm: metrics.netWpm,
+      accuracy: metrics.accuracy,
+      wpmDelta,
+    });
+
+    if (anomaly.isSuspicious && !p.isFlaggedSuspicious) {
+      p.isFlaggedSuspicious = true;
+      p.suspicionReason = anomaly.reason;
+      this.logger.warn(`[Anti-Cheat Flag] User ${p.username} in room ${roomId}: ${anomaly.reason}`);
+    }
+
+    p.lastWpm = metrics.netWpm;
+    p.lastUpdateTimestamp = now;
 
     p.typedIndex = safeTypedIndex;
     p.errorCount = errors;
@@ -361,14 +447,13 @@ export class RoomManager {
     p.speed = speed;
     p.progressPercent = Math.min(progressPercent, 100);
 
-    // Check for finish
     if (safeTypedIndex >= passageLength && !p.finished) {
       p.finished = true;
       p.finishTimeMs = now - (room.raceStartedAt || now);
       p.progressPercent = 100;
     }
 
-    // Update real-time rank positions
+    // Rank positions
     const sorted = Array.from(room.participants.values()).sort((a, b) => {
       if (a.finished && b.finished) return a.finishTimeMs - b.finishTimeMs;
       if (a.finished) return -1;
@@ -380,12 +465,67 @@ export class RoomManager {
       participant.rankPosition = idx + 1;
     });
 
-    // Check if all players finished
+    // Record periodic replay snapshot (1 per second max)
+    const timeMs = room.raceStartedAt ? now - room.raceStartedAt : 0;
+    const lastSnapshot = room.replaySnapshots[room.replaySnapshots.length - 1];
+    if (!lastSnapshot || timeMs - lastSnapshot.timeMs >= 800) {
+      room.replaySnapshots.push({
+        timeMs,
+        positions: Array.from(room.participants.values()).map(part => ({
+          userId: part.userId,
+          progress: part.progressPercent,
+          wpm: part.netWpm,
+          speed: part.speed,
+        })),
+      });
+    }
+
     const allFinished = Array.from(room.participants.values()).every(part => part.finished);
     if (allFinished) {
       room.state = RoomState.FINISHED;
+      this.persistFinishedRace(room);
     }
 
     return { participant: p, raceFinished: allFinished };
+  }
+
+  // Persists finished race to MongoDB
+  private async persistFinishedRace(room: MultiplayerRoom) {
+    try {
+      const participants = Array.from(room.participants.values()).map(p => ({
+        userId: p.userId,
+        username: p.username,
+        carId: p.carId,
+        rankPosition: p.rankPosition,
+        netWpm: p.netWpm,
+        rawWpm: p.rawWpm,
+        accuracy: p.accuracy,
+        finishTimeMs: p.finishTimeMs,
+        isFlaggedSuspicious: p.isFlaggedSuspicious,
+        suspicionReason: p.suspicionReason,
+      }));
+
+      const winner = participants.find(p => p.rankPosition === 1);
+
+      await this.racingService.persistRaceResult({
+        roomId: room.roomId,
+        passageId: room.passage.id,
+        passageTitle: room.passage.title,
+        language: room.passage.title.includes('বাঙলা') ? 'BN' : 'EN',
+        participants,
+        winnerUserId: winner?.userId,
+        raceStartedAt: room.raceStartedAt || Date.now(),
+        raceFinishedAt: Date.now(),
+        replaySnapshots: room.replaySnapshots,
+      });
+
+      // Release player locks
+      for (const p of participants) {
+        this.userActiveRoom.delete(p.userId);
+        this.redisService.del(`keyrush:lock:user:${p.userId}`).catch(() => {});
+      }
+    } catch (err: any) {
+      this.logger.error(`Error saving finished race ${room.roomId}: ${err.message}`);
+    }
   }
 }

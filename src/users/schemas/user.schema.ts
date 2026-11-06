@@ -48,7 +48,37 @@ export class User {
   organizationId: string;
 
   @Prop({ default: false })
+  isEmailVerified: boolean;
+
+  @Prop({ default: null })
+  emailVerificationToken: string;
+
+  @Prop({ default: null })
+  emailVerificationExpires: Date;
+
+  @Prop({ default: null })
+  passwordResetToken: string;
+
+  @Prop({ default: null })
+  passwordResetExpires: Date;
+
+  @Prop({ default: 0 })
+  failedLoginAttempts: number;
+
+  @Prop({ default: null })
+  lockUntil: Date;
+
+  @Prop({ default: false })
   twoFactorEnabled: boolean;
+
+  @Prop({ default: null })
+  twoFactorSecret: string;
+
+  @Prop({ type: [String], default: [] })
+  twoFactorBackupCodes: string[];
+
+  @Prop({ default: null })
+  lastLoginAt: Date;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

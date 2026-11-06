@@ -6,8 +6,8 @@ describe('Typing & Racing Formula Calculations', () => {
   let racingService: RacingService;
 
   beforeEach(() => {
-    typingService = new TypingService({} as any);
-    racingService = new RacingService();
+    typingService = new TypingService({} as any, {} as any, {} as any);
+    racingService = new RacingService({} as any, {} as any);
   });
 
   it('calculates Raw and Net WPM accurately using standard 5-character formula', () => {

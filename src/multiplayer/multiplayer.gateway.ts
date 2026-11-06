@@ -25,8 +25,8 @@ export class MultiplayerGateway implements OnGatewayConnection, OnGatewayDisconn
   @WebSocketServer()
   server: Server;
 
-  // Active countdown intervals per roomId
   private countdownTimers: Map<string, NodeJS.Timeout> = new Map();
+  private disconnectGraceTimers: Map<string, NodeJS.Timeout> = new Map();
 
   constructor(
     private readonly roomManager: RoomManager,
@@ -39,8 +39,14 @@ export class MultiplayerGateway implements OnGatewayConnection, OnGatewayDisconn
       const authHeader = client.handshake.headers.authorization;
       const token = client.handshake.auth?.token || (authHeader ? authHeader.replace('Bearer ', '') : null);
 
+      // Allow spectators to connect without full token if marked as spectator
+      if (!token && client.handshake.query?.spectator === 'true') {
+        client.data.isSpectator = true;
+        client.emit('race:connected', { role: 'SPECTATOR' });
+        return;
+      }
+
       if (!token) {
-        // Disallow unauthenticated guests from multiplayer
         client.emit('race:error', {
           code: 'UNAUTHORIZED_GUEST',
           message: 'Guest users cannot participate in multiplayer races. Please log in.',
@@ -79,24 +85,55 @@ export class MultiplayerGateway implements OnGatewayConnection, OnGatewayDisconn
   }
 
   handleDisconnect(client: Socket) {
+    // Clean up spectator
+    if (client.data?.currentSpectatingRoom) {
+      this.roomManager.removeSpectator(client.data.currentSpectatingRoom, client.id);
+    }
+
     const user = client.data?.user;
-    if (user && client.data?.currentRoomId) {
-      const roomId = client.data.currentRoomId;
-      try {
-        const { room, remainingCount } = this.roomManager.leaveRoom(roomId, user.userId);
-        this.server.to(roomId).emit('race:playerLeft', {
+    const roomId = client.data?.currentRoomId;
+
+    if (user && roomId) {
+      const room = this.roomManager.getRoom(roomId);
+      if (room && room.state === RoomState.IN_PROGRESS) {
+        // Active race: Apply 15-second disconnect grace period
+        this.roomManager.markPlayerDisconnected(roomId, user.userId);
+        this.server.to(roomId).emit('race:playerDisconnected', {
           userId: user.userId,
           username: user.username,
-          remainingCount,
+          graceSeconds: 15,
         });
-      } catch (e) {
-        // room already cleaned up
+
+        const timerKey = `${roomId}:${user.userId}`;
+        const timer = setTimeout(() => {
+          this.disconnectGraceTimers.delete(timerKey);
+          try {
+            const { remainingCount } = this.roomManager.leaveRoom(roomId, user.userId);
+            this.server.to(roomId).emit('race:playerLeft', {
+              userId: user.userId,
+              username: user.username,
+              remainingCount,
+            });
+          } catch (e) {}
+        }, 15000);
+
+        this.disconnectGraceTimers.set(timerKey, timer);
+      } else {
+        // Lobby or waiting: Leave immediately
+        try {
+          const { remainingCount } = this.roomManager.leaveRoom(roomId, user.userId);
+          this.server.to(roomId).emit('race:playerLeft', {
+            userId: user.userId,
+            username: user.username,
+            remainingCount,
+          });
+        } catch (e) {}
       }
     }
   }
 
   @SubscribeMessage('race:join')
-  handleJoinRoom(
+  async handleJoinRoom(
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { roomId: string; carId?: string },
   ) {
@@ -109,7 +146,7 @@ export class MultiplayerGateway implements OnGatewayConnection, OnGatewayDisconn
     }
 
     try {
-      const { room, participant } = this.roomManager.joinRoom(
+      const { room, participant } = await this.roomManager.joinRoom(
         data.roomId,
         user,
         client.id,
@@ -126,7 +163,7 @@ export class MultiplayerGateway implements OnGatewayConnection, OnGatewayDisconn
         isReady: p.isReady,
       }));
 
-      // Acknowledge to joining player
+      // Acknowledge joining player with reconnect token
       client.emit('race:joined', {
         roomId: room.roomId,
         name: room.name,
@@ -136,6 +173,7 @@ export class MultiplayerGateway implements OnGatewayConnection, OnGatewayDisconn
         state: room.state,
         passage: room.passage,
         participants: participantsList,
+        reconnectToken: participant.reconnectToken,
       });
 
       // Broadcast to other players in the room
@@ -154,6 +192,90 @@ export class MultiplayerGateway implements OnGatewayConnection, OnGatewayDisconn
         message: err.message || 'Could not join room.',
       });
     }
+  }
+
+  @SubscribeMessage('race:reconnect')
+  handleReconnect(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { roomId: string; userId: string; reconnectToken: string },
+  ) {
+    try {
+      const timerKey = `${data.roomId}:${data.userId}`;
+      if (this.disconnectGraceTimers.has(timerKey)) {
+        clearTimeout(this.disconnectGraceTimers.get(timerKey)!);
+        this.disconnectGraceTimers.delete(timerKey);
+      }
+
+      const { room, participant } = this.roomManager.reconnectPlayer(
+        data.roomId,
+        data.userId,
+        data.reconnectToken,
+        client.id,
+      );
+
+      client.data.user = { userId: participant.userId, username: participant.username, roles: ['PLAYER'] };
+      client.data.currentRoomId = room.roomId;
+      client.join(room.roomId);
+
+      client.emit('race:reconnected', {
+        roomState: room.state,
+        passage: room.passage,
+        raceStartedAt: room.raceStartedAt,
+        myProgress: participant.progressPercent,
+      });
+
+      client.to(room.roomId).emit('race:playerReconnected', {
+        userId: participant.userId,
+        username: participant.username,
+      });
+    } catch (err: any) {
+      client.emit('race:error', { code: 'RECONNECT_FAILED', message: err.message });
+    }
+  }
+
+  // Spectator Mode
+  @SubscribeMessage('spectator:join')
+  handleSpectatorJoin(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { roomId: string },
+  ) {
+    try {
+      const room = this.roomManager.addSpectator(data.roomId, client.id);
+      client.data.currentSpectatingRoom = room.roomId;
+      client.join(room.roomId);
+
+      const participantsList = Array.from(room.participants.values()).map(p => ({
+        userId: p.userId,
+        username: p.username,
+        carId: p.carId,
+        progressPercent: p.progressPercent,
+        netWpm: p.netWpm,
+        speed: p.speed,
+        rankPosition: p.rankPosition,
+      }));
+
+      client.emit('spectator:joined', {
+        roomId: room.roomId,
+        name: room.name,
+        state: room.state,
+        passage: room.passage,
+        participants: participantsList,
+        spectatorCount: room.spectators.size,
+      });
+    } catch (err: any) {
+      client.emit('race:error', { code: 'SPECTATE_FAILED', message: err.message });
+    }
+  }
+
+  @SubscribeMessage('spectator:leave')
+  handleSpectatorLeave(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { roomId: string },
+  ) {
+    this.roomManager.removeSpectator(data.roomId, client.id);
+    client.leave(data.roomId);
+    client.data.currentSpectatingRoom = null;
+    client.emit('spectator:left', { roomId: data.roomId });
   }
 
   @SubscribeMessage('race:ready')
@@ -189,7 +311,6 @@ export class MultiplayerGateway implements OnGatewayConnection, OnGatewayDisconn
     let countdown = 5;
 
     const timer = setInterval(() => {
-      // Rule 3.1: Minimum 2 players required. If a player leaves during countdown, abort.
       if (room.participants.size < 2) {
         clearInterval(timer);
         this.countdownTimers.delete(roomId);
@@ -223,7 +344,7 @@ export class MultiplayerGateway implements OnGatewayConnection, OnGatewayDisconn
   }
 
   @SubscribeMessage('race:typing')
-  handleTyping(
+  handleTypingUpdate(
     @ConnectedSocket() client: Socket,
     @MessageBody()
     data: {
@@ -236,66 +357,69 @@ export class MultiplayerGateway implements OnGatewayConnection, OnGatewayDisconn
     const user = client.data.user;
     if (!user) return;
 
-    try {
-      const { participant, raceFinished } = this.roomManager.updatePlayerTyping(
-        data.roomId,
-        user.userId,
-        data,
-      );
+    const { participant, raceFinished } = this.roomManager.updatePlayerTyping(
+      data.roomId,
+      user.userId,
+      {
+        typedIndex: data.typedIndex,
+        errorCount: data.errorCount,
+        rawInputCount: data.rawInputCount,
+      },
+    );
 
-      if (!participant) return;
+    if (!participant) return;
 
+    // Broadcast authoritative position tick to room and spectators
+    this.server.to(data.roomId).emit('race:progress', {
+      userId: participant.userId,
+      username: participant.username,
+      typedIndex: participant.typedIndex,
+      progressPercent: participant.progressPercent,
+      netWpm: participant.netWpm,
+      rawWpm: participant.rawWpm,
+      accuracy: participant.accuracy,
+      speed: participant.speed,
+      rankPosition: participant.rankPosition,
+      nitroActive: participant.nitroActive,
+      finished: participant.finished,
+      finishTimeMs: participant.finishTimeMs,
+      isFlaggedSuspicious: participant.isFlaggedSuspicious,
+    });
+
+    if (participant.finished && participant.progressPercent === 100) {
+      this.server.to(data.roomId).emit('race:playerFinished', {
+        userId: participant.userId,
+        username: participant.username,
+        rankPosition: participant.rankPosition,
+        finishTimeMs: participant.finishTimeMs,
+        netWpm: participant.netWpm,
+        accuracy: participant.accuracy,
+      });
+    }
+
+    if (raceFinished) {
       const room = this.roomManager.getRoom(data.roomId);
-      if (!room) return;
+      const podium = room
+        ? Array.from(room.participants.values()).sort((a, b) => a.rankPosition - b.rankPosition)
+        : [];
 
-      // Broadcast progress snapshot to all players in the room
-      const positions = Array.from(room.participants.values()).map(p => ({
-        userId: p.userId,
-        username: p.username,
-        progressPercent: p.progressPercent,
-        netWpm: p.netWpm,
-        rawWpm: p.rawWpm,
-        accuracy: p.accuracy,
-        speed: p.speed,
-        nitroActive: p.nitroActive,
-        rankPosition: p.rankPosition,
-        finished: p.finished,
-      }));
-
-      this.server.to(data.roomId).emit('race:progress', { positions });
-
-      if (raceFinished) {
-        const finalResults = Array.from(room.participants.values()).map(p => ({
+      this.server.to(data.roomId).emit('race:ended', {
+        roomId: data.roomId,
+        podium: podium.map(p => ({
           userId: p.userId,
           username: p.username,
-          carId: p.carId,
           rankPosition: p.rankPosition,
+          carId: p.carId,
           netWpm: p.netWpm,
           accuracy: p.accuracy,
           finishTimeMs: p.finishTimeMs,
-        }));
-
-        this.server.to(data.roomId).emit('race:finished', {
-          results: finalResults,
-        });
-
-        // Update statistics for all participants
-        finalResults.forEach(res => {
-          this.usersService.recordRaceStats(res.userId, {
-            wpm: res.netWpm,
-            accuracy: res.accuracy,
-            won: res.rankPosition === 1,
-            durationMs: res.finishTimeMs,
-          }).catch(() => {});
-        });
-      }
-    } catch (err: any) {
-      client.emit('race:error', { code: 'TYPING_UPDATE_ERROR', message: err.message });
+        })),
+      });
     }
   }
 
   @SubscribeMessage('race:leave')
-  handleLeave(
+  handleLeaveRoom(
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { roomId: string },
   ) {
@@ -303,7 +427,7 @@ export class MultiplayerGateway implements OnGatewayConnection, OnGatewayDisconn
     if (!user) return;
 
     try {
-      const { room, remainingCount } = this.roomManager.leaveRoom(data.roomId, user.userId);
+      const { remainingCount } = this.roomManager.leaveRoom(data.roomId, user.userId);
       client.leave(data.roomId);
       client.data.currentRoomId = null;
 
@@ -312,8 +436,10 @@ export class MultiplayerGateway implements OnGatewayConnection, OnGatewayDisconn
         username: user.username,
         remainingCount,
       });
+
+      client.emit('race:left', { roomId: data.roomId });
     } catch (err: any) {
-      client.emit('race:error', { code: 'LEAVE_ERROR', message: err.message });
+      client.emit('race:error', { code: 'LEAVE_FAILED', message: err.message });
     }
   }
 }

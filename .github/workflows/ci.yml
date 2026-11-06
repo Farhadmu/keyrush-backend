@@ -1,0 +1,48 @@
+name: KeyRush Backend CI
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  backend-test-and-build:
+    name: Build, Lint & Automated Verification
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Compile Backend (TypeScript / NestJS)
+        run: npm run build
+
+      - name: Run Test Suite (Anti-Cheat, Limits, Calculations & RBAC)
+        run: npm test
+        env:
+          NODE_ENV: test
+          JWT_SECRET: test_jwt_secret_for_ci_pipeline_32char_long!
+          JWT_REFRESH_SECRET: test_jwt_refresh_secret_for_ci_pipeline_long!
+          REDIS_HOST: localhost
+          REDIS_PORT: 6379

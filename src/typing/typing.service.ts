@@ -1,7 +1,9 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, Types } from 'mongoose';
 import { TypingPassage, TypingPassageDocument } from './schemas/passage.schema';
+import { TypingResult, TypingResultDocument } from './schemas/typing-result.schema';
+import { Profile, ProfileDocument } from '../users/schemas/profile.schema';
 
 export interface ScoreCalculationResult {
   rawWpm: number;
@@ -15,6 +17,8 @@ export interface ScoreCalculationResult {
 
 @Injectable()
 export class TypingService implements OnModuleInit {
+  private readonly logger = new Logger(TypingService.name);
+
   private fallbackPassages: Partial<TypingPassage>[] = [
     {
       title: 'Neon Horizon Circuit',
@@ -31,6 +35,14 @@ export class TypingService implements OnModuleInit {
       difficulty: 'ADVANCED',
       wordCount: 16,
       category: 'TECH',
+    },
+    {
+      title: 'TypeScript Clean Architecture',
+      content: 'interface VehicleEngine { ignite(): Promise<boolean>; throttle(pressure: number): void; shutdown(): void; }',
+      language: 'EN',
+      difficulty: 'EXPERT',
+      wordCount: 12,
+      category: 'CODE',
     },
     {
       title: 'বাঙলার নদী ও প্রকৃতি',
@@ -52,6 +64,8 @@ export class TypingService implements OnModuleInit {
 
   constructor(
     @InjectModel(TypingPassage.name) private passageModel: Model<TypingPassageDocument>,
+    @InjectModel(TypingResult.name) private typingResultModel: Model<TypingResultDocument>,
+    @InjectModel(Profile.name) private profileModel: Model<ProfileDocument>,
   ) {}
 
   async onModuleInit() {
@@ -59,62 +73,142 @@ export class TypingService implements OnModuleInit {
       const count = await this.passageModel.countDocuments();
       if (count === 0) {
         await this.passageModel.insertMany(this.fallbackPassages);
+        this.logger.log('Seeded default multilingual typing passages');
       }
-    } catch (e) {
-      // In-memory or initial startup note
+    } catch (e: any) {
+      this.logger.warn(`Could not seed passages: ${e.message}`);
     }
   }
 
-  // Authoritative WPM & Accuracy Calculation
+  // Authoritative WPM & Accuracy calculation
   calculateMetrics(
-    totalTypedChars: number,
-    correctChars: number,
+    totalCharactersTyped: number,
+    correctCharacters: number,
     elapsedSeconds: number,
   ): ScoreCalculationResult {
-    const elapsedMinutes = Math.max(elapsedSeconds / 60, 0.05); // prevent divide by zero
-    const rawWpm = Number(((totalTypedChars / 5) / elapsedMinutes).toFixed(1));
-    const netWpm = Math.max(0, Number(((correctChars / 5) / elapsedMinutes).toFixed(1)));
-    const accuracy = totalTypedChars > 0
-      ? Number(((correctChars / totalTypedChars) * 100).toFixed(1))
+    const safeElapsed = Math.max(elapsedSeconds, 0.5);
+    const minutes = safeElapsed / 60;
+    const incorrectCharacters = Math.max(0, totalCharactersTyped - correctCharacters);
+
+    // Standard formula: 5 characters = 1 word
+    const rawWpm = Math.round((totalCharactersTyped / 5) / minutes);
+    const netWpm = Math.max(0, Math.round(((totalCharactersTyped / 5) - (incorrectCharacters / 5)) / minutes));
+
+    const accuracy = totalCharactersTyped > 0
+      ? Number(((correctCharacters / totalCharactersTyped) * 100).toFixed(1))
       : 100;
-    const incorrectChars = Math.max(0, totalTypedChars - correctChars);
 
     return {
       rawWpm,
       netWpm,
-      accuracy,
-      correctCharacters: correctChars,
-      incorrectCharacters: incorrectChars,
-      totalCharacters: totalTypedChars,
-      elapsedSeconds,
+      accuracy: Math.min(accuracy, 100),
+      correctCharacters,
+      incorrectCharacters,
+      totalCharacters: totalCharactersTyped,
+      elapsedSeconds: Number(safeElapsed.toFixed(2)),
     };
   }
 
-  async getRandomPassage(language: string = 'EN', difficulty?: string): Promise<TypingPassage> {
-    try {
-      const query: any = { language };
-      if (difficulty) query.difficulty = difficulty;
-      const count = await this.passageModel.countDocuments(query);
-      if (count > 0) {
-        const random = Math.floor(Math.random() * count);
-        return await this.passageModel.findOne(query).skip(random);
-      }
-    } catch (e) {
-      // fallback
-    }
-
-    const filtered = this.fallbackPassages.filter(p => p.language === language);
-    const chosen = filtered.length > 0 ? filtered[Math.floor(Math.random() * filtered.length)] : this.fallbackPassages[0];
-    return chosen as TypingPassage;
+  // Unicode & IME Normalized matching
+  normalizeText(input: string): string {
+    return (input || '').normalize('NFC');
   }
 
-  async getPassageById(id: string): Promise<TypingPassage> {
-    try {
-      const passage = await this.passageModel.findById(id);
-      if (passage) return passage;
-    } catch (e) {
-      // fallback
+  async getRandomPassage(language: string = 'EN', difficulty?: string): Promise<TypingPassageDocument> {
+    const query: any = { language: language.toUpperCase() };
+    if (difficulty) query.difficulty = difficulty.toUpperCase();
+
+    const count = await this.passageModel.countDocuments(query);
+    if (count === 0) {
+      const defaultDoc = this.passageModel.findOne();
+      return typeof (defaultDoc as any)?.exec === 'function' ? (defaultDoc as any).exec() : defaultDoc;
     }
-    return this.fallbackPassages[0] as TypingPassage;
+    const random = Math.floor(Math.random() * count);
+    const queryBuilder = this.passageModel.findOne(query).skip(random);
+    return typeof (queryBuilder as any)?.exec === 'function' ? (queryBuilder as any).exec() : queryBuilder;
+  }
+
+  async getAllPassages(language?: string): Promise<TypingPassageDocument[]> {
+    const query: any = {};
+    if (language) query.language = language.toUpperCase();
+    return this.passageModel.find(query).exec();
+  }
+
+  // -------------------------------------------------------------
+  // Practice Session Persistence & Stats
+  // -------------------------------------------------------------
+  async recordPracticeSession(data: {
+    userId: string;
+    passageId?: string;
+    mode: string;
+    language: string;
+    rawWpm: number;
+    netWpm: number;
+    accuracy: number;
+    durationSeconds: number;
+    correctChars: number;
+    incorrectChars: number;
+    keyMisses?: Record<string, number>;
+  }): Promise<TypingResultDocument> {
+    const result = new this.typingResultModel({
+      userId: new Types.ObjectId(data.userId),
+      passageId: data.passageId && Types.ObjectId.isValid(data.passageId) ? new Types.ObjectId(data.passageId) : null,
+      mode: data.mode || '60s',
+      language: (data.language || 'EN').toUpperCase(),
+      rawWpm: data.rawWpm,
+      netWpm: data.netWpm,
+      accuracy: data.accuracy,
+      durationSeconds: data.durationSeconds,
+      correctChars: data.correctChars,
+      incorrectChars: data.incorrectChars,
+      keyMisses: data.keyMisses || {},
+    });
+
+    const saved = await result.save();
+
+    // Update profile practice time and stats
+    if (Types.ObjectId.isValid(data.userId)) {
+      const profile = await this.profileModel.findOne({ userId: new Types.ObjectId(data.userId) });
+      if (profile) {
+        profile.stats.totalPracticeTimeMs += (data.durationSeconds * 1000);
+        if (data.netWpm > profile.stats.bestWpm) {
+          profile.stats.bestWpm = data.netWpm;
+        }
+        profile.xp += 25; // 25 XP per practice drill
+        profile.level = Math.floor(profile.xp / 500) + 1;
+        await profile.save();
+      }
+    }
+
+    return saved;
+  }
+
+  async getUserPracticeHistory(userId: string, limit: number = 20) {
+    if (!Types.ObjectId.isValid(userId)) return [];
+    return this.typingResultModel
+      .find({ userId: new Types.ObjectId(userId) })
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .exec();
+  }
+
+  async getUserWeaknesses(userId: string) {
+    if (!Types.ObjectId.isValid(userId)) return {};
+    const results = await this.typingResultModel
+      .find({ userId: new Types.ObjectId(userId) })
+      .sort({ createdAt: -1 })
+      .limit(30)
+      .select('keyMisses')
+      .exec();
+
+    const aggregateMisses: Record<string, number> = {};
+    for (const r of results) {
+      if (r.keyMisses) {
+        for (const [key, count] of Object.entries(r.keyMisses)) {
+          aggregateMisses[key] = (aggregateMisses[key] || 0) + (count as number);
+        }
+      }
+    }
+    return aggregateMisses;
   }
 }

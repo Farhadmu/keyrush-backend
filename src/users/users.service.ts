@@ -1,7 +1,7 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
-import { User, UserDocument } from './schemas/user.schema';
+import { Model, Types } from 'mongoose';
+import { User, UserDocument, UserStatus } from './schemas/user.schema';
 import { Profile, ProfileDocument } from './schemas/profile.schema';
 
 @Injectable()
@@ -18,9 +18,49 @@ export class UsersService {
     return { user, profile };
   }
 
+  async getProfileByUserId(userId: string) {
+    const user = await this.userModel.findById(userId).select('-passwordHash');
+    if (!user) throw new NotFoundException('User not found');
+    const profile = await this.profileModel.findOne({ userId: user._id });
+    return { user, profile };
+  }
+
+  async updateProfile(
+    userId: string,
+    data: {
+      displayName?: string;
+      bio?: string;
+      avatarUrl?: string;
+      country?: string;
+      languagePreference?: string;
+      selectedCarId?: string;
+    },
+  ) {
+    const user = await this.userModel.findById(userId);
+    if (!user) throw new NotFoundException('User not found');
+
+    if (data.country) user.country = data.country;
+    if (data.languagePreference) user.languagePreference = data.languagePreference;
+    await user.save();
+
+    const updateFields: any = {};
+    if (data.displayName !== undefined) updateFields.displayName = data.displayName;
+    if (data.bio !== undefined) updateFields.bio = data.bio;
+    if (data.avatarUrl !== undefined) updateFields.avatarUrl = data.avatarUrl;
+    if (data.selectedCarId !== undefined) updateFields.selectedCarId = data.selectedCarId;
+
+    const profile = await this.profileModel.findOneAndUpdate(
+      { userId: user._id },
+      { $set: updateFields },
+      { new: true },
+    );
+
+    return { user: user.toObject(), profile };
+  }
+
   async updateCarSelection(userId: string, carId: string) {
     const profile = await this.profileModel.findOneAndUpdate(
-      { userId },
+      { userId: new Types.ObjectId(userId) },
       { selectedCarId: carId },
       { new: true },
     );
@@ -28,45 +68,46 @@ export class UsersService {
     return profile;
   }
 
-  async recordRaceStats(userId: string, stats: { wpm: number; accuracy: number; won: boolean; durationMs: number }) {
-    const profile = await this.profileModel.findOne({ userId });
-    if (!profile) return null;
+  // Admin User Management
+  async getAllUsers(options: { search?: string; role?: string; status?: string; limit?: number; page?: number }) {
+    const query: any = {};
+    if (options.search) {
+      query.$or = [
+        { username: { $regex: options.search, $options: 'i' } },
+        { email: { $regex: options.search, $options: 'i' } },
+      ];
+    }
+    if (options.role) query.roles = options.role;
+    if (options.status) query.status = options.status;
 
-    const currentStats = profile.stats || {
-      totalRaces: 0,
-      wins: 0,
-      losses: 0,
-      bestWpm: 0,
-      averageWpm: 0,
-      averageAccuracy: 0,
-      totalPracticeTimeMs: 0,
+    const limit = options.limit || 50;
+    const page = options.page || 1;
+    const skip = (page - 1) * limit;
+
+    const [users, total] = await Promise.all([
+      this.userModel.find(query).select('-passwordHash').skip(skip).limit(limit).sort({ createdAt: -1 }),
+      this.userModel.countDocuments(query),
+    ]);
+
+    return {
+      users,
+      total,
+      page,
+      totalPages: Math.ceil(total / limit),
     };
+  }
 
-    const totalRaces = currentStats.totalRaces + 1;
-    const wins = currentStats.wins + (stats.won ? 1 : 0);
-    const losses = currentStats.losses + (stats.won ? 0 : 1);
-    const bestWpm = Math.max(currentStats.bestWpm, stats.wpm);
-    const averageWpm = Number(((currentStats.averageWpm * currentStats.totalRaces + stats.wpm) / totalRaces).toFixed(1));
-    const averageAccuracy = Number(((currentStats.averageAccuracy * currentStats.totalRaces + stats.accuracy) / totalRaces).toFixed(1));
-    const totalPracticeTimeMs = currentStats.totalPracticeTimeMs + stats.durationMs;
+  async updateUserStatus(userId: string, status: string) {
+    const user = await this.userModel.findById(userId);
+    if (!user) throw new NotFoundException('User not found');
+    user.status = status;
+    return user.save();
+  }
 
-    // XP calculation: 100 XP base + WPM bonus + victory bonus
-    const xpGained = Math.round(50 + stats.wpm * 1.5 + (stats.won ? 100 : 20));
-    const newXp = profile.xp + xpGained;
-    const newLevel = Math.floor(newXp / 500) + 1;
-
-    profile.xp = newXp;
-    profile.level = newLevel;
-    profile.stats = {
-      totalRaces,
-      wins,
-      losses,
-      bestWpm,
-      averageWpm,
-      averageAccuracy,
-      totalPracticeTimeMs,
-    };
-
-    return profile.save();
+  async updateUserRoles(userId: string, roles: string[]) {
+    const user = await this.userModel.findById(userId);
+    if (!user) throw new NotFoundException('User not found');
+    user.roles = roles;
+    return user.save();
   }
 }

@@ -2,6 +2,9 @@ import { Module } from '@nestjs/common';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { APP_GUARD } from '@nestjs/core';
 import { DatabaseModule } from './common/database/database.module';
+import { RedisModule } from './common/redis/redis.module';
+import { AuditModule } from './common/audit/audit.module';
+import { AiModule } from './common/ai/ai.module';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { TypingModule } from './typing/typing.module';
@@ -23,6 +26,9 @@ import { HealthModule } from './health/health.module';
       },
     ]),
     DatabaseModule,
+    RedisModule,
+    AuditModule,
+    AiModule,
     HealthModule,
     AuthModule,
     UsersModule,

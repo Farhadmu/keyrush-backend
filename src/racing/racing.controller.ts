@@ -1,5 +1,7 @@
-import { Controller, Get, Param, Query } from '@nestjs/common';
+import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
 import { RacingService } from './racing.service';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
 
 @Controller('racing')
 export class RacingController {
@@ -15,10 +17,22 @@ export class RacingController {
     return this.racingService.getCarById(id);
   }
 
-  @Get('bots')
-  getBots(@Query('count') count?: string, @Query('targetWpm') targetWpm?: string) {
-    const numBots = count ? parseInt(count, 10) : 3;
-    const wpm = targetWpm ? parseInt(targetWpm, 10) : 65;
-    return this.racingService.generateBots(numBots, wpm);
+  @Get('results/recent')
+  getRecentResults(@Query('limit') limit: number = 20) {
+    return this.racingService.getRecentResults(Number(limit));
+  }
+
+  @Get('results/:id')
+  getResultById(@Param('id') id: string) {
+    return this.racingService.getResultById(id);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('history')
+  getUserRaceHistory(
+    @CurrentUser('userId') userId: string,
+    @Query('limit') limit: number = 20,
+  ) {
+    return this.racingService.getUserRaceHistory(userId, Number(limit));
   }
 }

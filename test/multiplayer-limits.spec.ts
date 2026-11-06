@@ -7,20 +7,37 @@ describe('Absolute Game Rule 3.1: Multiplayer Room Capacity Limits (2-7 Players)
   let roomManager: RoomManager;
   let typingService: TypingService;
   let racingService: RacingService;
+  let redisService: any;
+  let aiService: any;
 
   beforeEach(() => {
     // Mock typing service and racing service without external DB dependency
-    typingService = new TypingService({
-      countDocuments: jest.fn().mockResolvedValue(1),
-      findOne: jest.fn().mockReturnValue({ skip: jest.fn().mockResolvedValue({
-        title: 'Quantum Sprint',
-        content: 'Testing typing racing mechanics with high precision.',
-        wordCount: 7,
-      }) }),
-    } as any);
+    typingService = new TypingService(
+      {
+        countDocuments: jest.fn().mockResolvedValue(1),
+        findOne: jest.fn().mockReturnValue({
+          skip: jest.fn().mockResolvedValue({
+            title: 'Quantum Sprint',
+            content: 'Testing typing racing mechanics with high precision.',
+            wordCount: 7,
+          }),
+        }),
+      } as any,
+      {} as any,
+      {} as any,
+    );
 
-    racingService = new RacingService();
-    roomManager = new RoomManager(typingService, racingService);
+    racingService = new RacingService({} as any, {} as any);
+    redisService = {
+      set: jest.fn().mockResolvedValue(undefined),
+      get: jest.fn().mockResolvedValue(null),
+      del: jest.fn().mockResolvedValue(undefined),
+    };
+    aiService = {
+      analyzeTelemetryAnomaly: jest.fn().mockReturnValue({ isSuspicious: false }),
+    };
+
+    roomManager = new RoomManager(typingService, racingService, redisService, aiService);
   });
 
   const createMockPlayer = (id: string, username: string, isGuest: boolean = false) => ({
@@ -39,16 +56,16 @@ describe('Absolute Game Rule 3.1: Multiplayer Room Capacity Limits (2-7 Players)
     const host = createMockPlayer('player_host', 'HostRacer');
     const room = await roomManager.createRoom(host, { maxPlayers: 7 });
 
-    expect(() => {
-      roomManager.joinRoom(room.roomId, guestUser, 'socket_guest');
-    }).toThrow(ForbiddenException);
+    await expect(
+      roomManager.joinRoom(room.roomId, guestUser, 'socket_guest'),
+    ).rejects.toThrow(ForbiddenException);
   });
 
   it('RULE 3.1: Race CANNOT start with 1 player (must require minimum 2 players)', async () => {
     const host = createMockPlayer('player_1', 'RacerOne');
     const room = await roomManager.createRoom(host, { maxPlayers: 7 });
 
-    roomManager.joinRoom(room.roomId, host, 'socket_1');
+    await roomManager.joinRoom(room.roomId, host, 'socket_1');
     const result = roomManager.setPlayerReady(room.roomId, host.userId, true);
 
     expect(result.canStart).toBe(false);
@@ -60,8 +77,8 @@ describe('Absolute Game Rule 3.1: Multiplayer Room Capacity Limits (2-7 Players)
     const p2 = createMockPlayer('player_2', 'RacerTwo');
 
     const room = await roomManager.createRoom(p1, { maxPlayers: 7 });
-    roomManager.joinRoom(room.roomId, p1, 'socket_1');
-    roomManager.joinRoom(room.roomId, p2, 'socket_2');
+    await roomManager.joinRoom(room.roomId, p1, 'socket_1');
+    await roomManager.joinRoom(room.roomId, p2, 'socket_2');
 
     roomManager.setPlayerReady(room.roomId, p1.userId, true);
     const readyResult = roomManager.setPlayerReady(room.roomId, p2.userId, true);
@@ -74,11 +91,11 @@ describe('Absolute Game Rule 3.1: Multiplayer Room Capacity Limits (2-7 Players)
     const host = createMockPlayer('player_1', 'Racer1');
     const room = await roomManager.createRoom(host, { maxPlayers: 7 });
 
-    roomManager.joinRoom(room.roomId, host, 'socket_1');
+    await roomManager.joinRoom(room.roomId, host, 'socket_1');
 
     for (let i = 2; i <= 7; i++) {
       const p = createMockPlayer(`player_${i}`, `Racer${i}`);
-      const { room: updatedRoom } = roomManager.joinRoom(room.roomId, p, `socket_${i}`);
+      const { room: updatedRoom } = await roomManager.joinRoom(room.roomId, p, `socket_${i}`);
       expect(updatedRoom.participants.size).toBe(i);
     }
 
@@ -89,31 +106,31 @@ describe('Absolute Game Rule 3.1: Multiplayer Room Capacity Limits (2-7 Players)
     const host = createMockPlayer('player_1', 'Racer1');
     const room = await roomManager.createRoom(host, { maxPlayers: 7 });
 
-    roomManager.joinRoom(room.roomId, host, 'socket_1');
+    await roomManager.joinRoom(room.roomId, host, 'socket_1');
 
     for (let i = 2; i <= 7; i++) {
       const p = createMockPlayer(`player_${i}`, `Racer${i}`);
-      roomManager.joinRoom(room.roomId, p, `socket_${i}`);
+      await roomManager.joinRoom(room.roomId, p, `socket_${i}`);
     }
 
     expect(room.participants.size).toBe(7);
 
-    // Attempting to join an 8th player
-    const eighthPlayer = createMockPlayer('player_8', 'Racer8');
-    expect(() => {
-      roomManager.joinRoom(room.roomId, eighthPlayer, 'socket_8');
-    }).toThrow(BadRequestException);
+    const player8 = createMockPlayer('player_8', 'Racer8');
+    await expect(
+      roomManager.joinRoom(room.roomId, player8, 'socket_8'),
+    ).rejects.toThrow(BadRequestException);
   });
 
-  it('RULE 3.1: A player cannot occupy multiple slots in the same room', async () => {
+  it('RULE 3.1: Duplicate player cannot join same room under multiple sockets', async () => {
     const host = createMockPlayer('player_1', 'Racer1');
     const room = await roomManager.createRoom(host, { maxPlayers: 7 });
 
-    roomManager.joinRoom(room.roomId, host, 'socket_1');
+    await roomManager.joinRoom(room.roomId, host, 'socket_orig');
     expect(room.participants.size).toBe(1);
 
-    // Same user rejoins (e.g. reconnect or duplicate tab)
-    roomManager.joinRoom(room.roomId, host, 'socket_reconnected');
-    expect(room.participants.size).toBe(1); // slot count unchanged
+    // Reconnecting with new socket should update socket without increasing count
+    const { participant } = await roomManager.joinRoom(room.roomId, host, 'socket_reconnected');
+    expect(room.participants.size).toBe(1);
+    expect(participant.socketId).toBe('socket_reconnected');
   });
 });
