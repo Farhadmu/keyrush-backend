@@ -10,6 +10,9 @@ import {
 } from '@nestjs/common';
 import { OrganizationsService } from './organizations.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../auth/guards/roles.guard';
+import { Roles } from '../auth/decorators/roles.decorator';
+import { UserRole } from '../auth/roles.enum';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 
 @Controller('organizations')
@@ -97,5 +100,30 @@ export class OrganizationsController {
     @Body('userId') targetUserId: string,
   ) {
     return this.orgsService.addTeamMember(teamId, callerUserId, targetUserId);
+  }
+
+  // Super Admin Organization Oversight
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.SUPER_ADMIN, UserRole.PLATFORM_MODERATOR)
+  @Patch(':id/verify')
+  verifyOrganization(
+    @Param('id') orgId: string,
+    @Body('isVerified') isVerified: boolean,
+    @Body('reason') reason?: string,
+    @CurrentUser('userId') adminUserId?: string,
+  ) {
+    return this.orgsService.verifyOrganization(orgId, isVerified, reason, { userId: adminUserId });
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.SUPER_ADMIN, UserRole.PLATFORM_MODERATOR)
+  @Patch(':id/status')
+  updateOrganizationStatus(
+    @Param('id') orgId: string,
+    @Body('isSuspended') isSuspended: boolean,
+    @Body('reason') reason?: string,
+    @CurrentUser('userId') adminUserId?: string,
+  ) {
+    return this.orgsService.updateOrganizationStatus(orgId, isSuspended, reason, { userId: adminUserId });
   }
 }

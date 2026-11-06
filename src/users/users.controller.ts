@@ -67,8 +67,9 @@ export class UsersController {
   async updateUserStatus(
     @Param('id') userId: string,
     @Body('status') status: string,
+    @CurrentUser('userId') adminUserId: string,
   ) {
-    return this.usersService.updateUserStatus(userId, status);
+    return this.usersService.updateUserStatus(userId, status, { userId: adminUserId });
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -77,7 +78,8 @@ export class UsersController {
   async updateUserRoles(
     @Param('id') userId: string,
     @Body('roles') roles: string[],
+    @CurrentUser('userId') adminUserId: string,
   ) {
-    return this.usersService.updateUserRoles(userId, roles);
+    return this.usersService.updateUserRoles(userId, roles, { userId: adminUserId });
   }
 }

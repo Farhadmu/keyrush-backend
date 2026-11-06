@@ -4,6 +4,7 @@ import {
   ConflictException,
   ForbiddenException,
   BadRequestException,
+  Optional,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
@@ -16,6 +17,7 @@ import {
   OrgRole,
   MembershipStatus,
 } from './schemas/organization-member.schema';
+import { AuditService } from '../common/audit/audit.service';
 
 @Injectable()
 export class OrganizationsService {
@@ -24,6 +26,7 @@ export class OrganizationsService {
     @InjectModel(User.name) private userModel: Model<UserDocument>,
     @InjectModel(Team.name) private teamModel: Model<TeamDocument>,
     @InjectModel(OrganizationMember.name) private memberModel: Model<OrganizationMemberDocument>,
+    @Optional() private readonly auditService?: AuditService,
   ) {
     this.seedDefaultOrganizations();
   }
@@ -304,5 +307,58 @@ export class OrganizationsService {
         totalTrophies: 12,
       },
     };
+  }
+
+  // -------------------------------------------------------------
+  // Super Admin Organization Oversight
+  // -------------------------------------------------------------
+  async verifyOrganization(
+    orgId: string,
+    isVerified: boolean,
+    reason?: string,
+    actor?: { userId?: string; username?: string },
+  ) {
+    const org = await this.orgModel.findById(orgId);
+    if (!org) throw new NotFoundException('Organization not found');
+    org.isVerified = isVerified;
+    const saved = await org.save();
+
+    if (this.auditService) {
+      await this.auditService.logAction({
+        actorId: actor?.userId,
+        actorUsername: actor?.username || 'SUPER_ADMIN',
+        action: isVerified ? 'ORG_VERIFIED' : 'ORG_VERIFICATION_REVOKED',
+        resource: 'ORGANIZATION',
+        resourceId: org._id.toString(),
+        details: { orgName: org.name, slug: org.slug, isVerified, reason },
+      });
+    }
+
+    return { success: true, organization: saved, reason };
+  }
+
+  async updateOrganizationStatus(
+    orgId: string,
+    isSuspended: boolean,
+    reason?: string,
+    actor?: { userId?: string; username?: string },
+  ) {
+    const org = await this.orgModel.findById(orgId);
+    if (!org) throw new NotFoundException('Organization not found');
+    (org as any).isSuspended = isSuspended;
+    const saved = await org.save();
+
+    if (this.auditService) {
+      await this.auditService.logAction({
+        actorId: actor?.userId,
+        actorUsername: actor?.username || 'SUPER_ADMIN',
+        action: isSuspended ? 'ORG_SUSPENDED' : 'ORG_REACTIVATED',
+        resource: 'ORGANIZATION',
+        resourceId: org._id.toString(),
+        details: { orgName: org.name, slug: org.slug, isSuspended, reason },
+      });
+    }
+
+    return { success: true, organization: saved, isSuspended, reason };
   }
 }

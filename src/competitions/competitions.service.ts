@@ -13,6 +13,7 @@ import { Competition, CompetitionDocument, CompetitionStatus } from './schemas/c
 import { CompetitionRegistration, CompetitionRegistrationDocument } from './schemas/registration.schema';
 import { TournamentMatch, TournamentMatchDocument, MatchStatus } from './schemas/tournament-match.schema';
 import { Certificate, CertificateDocument } from './schemas/certificate.schema';
+import { normalizeRole } from '../auth/roles.enum';
 
 @Injectable()
 export class CompetitionsService {
@@ -134,6 +135,14 @@ export class CompetitionsService {
   ) {
     if (!user || user.roles.includes('GUEST')) {
       throw new BadRequestException('Guest users cannot register for official events. Please create an account.');
+    }
+
+    // Role Restriction: ORGANIZER and SUPER_ADMIN cannot compete in tournaments
+    const userCanonicalRoles = (user.roles || []).map((r: string) => normalizeRole(r));
+    if (userCanonicalRoles.includes('ORGANIZER') || userCanonicalRoles.includes('SUPER_ADMIN')) {
+      throw new ForbiddenException(
+        'Organizers and Administrators cannot register as competitors in tournaments. Please use an authorized USER account to race.',
+      );
     }
 
     const comp = await this.compModel.findById(competitionId);

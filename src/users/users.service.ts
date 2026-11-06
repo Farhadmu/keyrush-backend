@@ -1,10 +1,11 @@
-import { Injectable, NotFoundException, BadRequestException, OnModuleInit, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, OnModuleInit, Logger, Optional } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import * as argon2 from '@node-rs/argon2';
 import { User, UserDocument, UserStatus } from './schemas/user.schema';
 import { Profile, ProfileDocument } from './schemas/profile.schema';
-import { UserRole } from '../auth/roles.enum';
+import { UserRole, normalizeRole } from '../auth/roles.enum';
+import { AuditService } from '../common/audit/audit.service';
 
 @Injectable()
 export class UsersService implements OnModuleInit {
@@ -13,6 +14,7 @@ export class UsersService implements OnModuleInit {
   constructor(
     @InjectModel(User.name) private userModel: Model<UserDocument>,
     @InjectModel(Profile.name) private profileModel: Model<ProfileDocument>,
+    @Optional() private readonly auditService?: AuditService,
   ) {}
 
   async onModuleInit() {
@@ -202,17 +204,59 @@ export class UsersService implements OnModuleInit {
     };
   }
 
-  async updateUserStatus(userId: string, status: string) {
+  async updateUserStatus(userId: string, status: string, actor?: { userId?: string; username?: string }) {
     const user = await this.userModel.findById(userId);
     if (!user) throw new NotFoundException('User not found');
+    const oldStatus = user.status;
     user.status = status;
-    return user.save();
+    const saved = await user.save();
+
+    if (this.auditService) {
+      await this.auditService.logAction({
+        actorId: actor?.userId,
+        actorUsername: actor?.username || 'SUPER_ADMIN',
+        action: 'USER_STATUS_UPDATED',
+        resource: 'USER',
+        resourceId: user._id.toString(),
+        details: { oldStatus, newStatus: status, username: user.username },
+      });
+    }
+
+    return saved;
   }
 
-  async updateUserRoles(userId: string, roles: string[]) {
+  async updateUserRoles(userId: string, roles: string[], actor?: { userId?: string; username?: string }) {
     const user = await this.userModel.findById(userId);
     if (!user) throw new NotFoundException('User not found');
-    user.roles = roles;
-    return user.save();
+
+    // Canonical role validation
+    const validRoles = [
+      UserRole.USER,
+      UserRole.ORGANIZER,
+      UserRole.SUPER_ADMIN,
+      UserRole.PLATFORM_MODERATOR,
+    ];
+    const normalized = roles.map((r) => normalizeRole(r));
+    for (const r of normalized) {
+      if (!validRoles.includes(r as any)) {
+        throw new BadRequestException(`Invalid canonical role specified: ${r}`);
+      }
+    }
+    const oldRoles = [...user.roles];
+    user.roles = normalized;
+    const saved = await user.save();
+
+    if (this.auditService) {
+      await this.auditService.logAction({
+        actorId: actor?.userId,
+        actorUsername: actor?.username || 'SUPER_ADMIN',
+        action: 'USER_ROLES_UPDATED',
+        resource: 'USER',
+        resourceId: user._id.toString(),
+        details: { oldRoles, newRoles: normalized, username: user.username },
+      });
+    }
+
+    return saved;
   }
 }

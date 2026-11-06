@@ -11,6 +11,7 @@ import { Server, Socket } from 'socket.io';
 import { JwtService } from '@nestjs/jwt';
 import { RoomManager, RoomState } from './room.manager';
 import { UsersService } from '../users/users.service';
+import { normalizeRole } from '../auth/roles.enum';
 
 @WebSocketGateway({
   cors: {
@@ -162,6 +163,15 @@ export class MultiplayerGateway implements OnGatewayConnection, OnGatewayDisconn
       return client.emit('race:error', {
         code: 'UNAUTHENTICATED',
         message: 'You must be logged in to join a race.',
+      });
+    }
+
+    // Role Restriction: ORGANIZER and SUPER_ADMIN cannot participate in competitive gameplay
+    const userRoles = (user.roles || []).map((r: string) => normalizeRole(r));
+    if (userRoles.includes('ORGANIZER') || userRoles.includes('SUPER_ADMIN')) {
+      return client.emit('race:error', {
+        code: 'ROLE_RESTRICTION',
+        message: 'Organizers and Administrators cannot participate in competitive gameplay. Please use an authorized USER account to race.',
       });
     }
 
