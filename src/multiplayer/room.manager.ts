@@ -61,6 +61,7 @@ export interface MultiplayerRoom {
   hostUserId: string;
   minPlayers: number; // strictly 2
   maxPlayers: number; // strictly 2 to 7 (default 7)
+  allowedUserIds?: string[]; // For tournament/competition heats: only assigned users can join
   state: RoomState;
   passage: {
     id: string;
@@ -193,6 +194,69 @@ export class RoomManager {
     return room;
   }
 
+  async createOrProvisionHeatRoom(
+    roomId: string,
+    options: {
+      name: string;
+      passageId?: string;
+      passageContent?: string;
+      passageTitle?: string;
+      maxPlayers?: number;
+      language?: string;
+      allowedUserIds?: string[];
+    },
+  ): Promise<MultiplayerRoom> {
+    const existing = await this.getRoomOrHydrate(roomId);
+    if (existing) {
+      if (options.allowedUserIds && options.allowedUserIds.length > 0) {
+        existing.allowedUserIds = options.allowedUserIds;
+        await this.syncRoomToRedis(existing);
+      }
+      return existing;
+    }
+
+    let passage = options.passageContent
+      ? {
+          id: options.passageId || 'passage_event',
+          title: options.passageTitle || 'Official Tournament Passage',
+          content: options.passageContent,
+          wordCount: options.passageContent.trim().split(/\s+/).length,
+          charCount: options.passageContent.length,
+        }
+      : await this.typingService.getRandomPassage(options.language || 'EN');
+
+    const max = options.maxPlayers && options.maxPlayers >= 2 && options.maxPlayers <= 7 ? options.maxPlayers : 7;
+
+    const room: MultiplayerRoom = {
+      roomId,
+      name: options.name,
+      isPrivate: false,
+      hostUserId: 'system_tournament',
+      minPlayers: 2,
+      maxPlayers: max,
+      allowedUserIds: options.allowedUserIds || [],
+      state: RoomState.WAITING,
+      passage: {
+        id: (passage as any)?._id?.toString() || options.passageId || 'passage_event',
+        title: (passage as any)?.title || 'Tournament Sprint',
+        content: passage.content,
+        wordCount: passage.wordCount,
+        charCount: passage.content.length,
+      },
+      participants: new Map(),
+      spectators: new Set(),
+      countdownSeconds: 5,
+      raceStartedAt: null,
+      createdAt: new Date(),
+      expiresAt: new Date(Date.now() + 4 * 60 * 60 * 1000),
+      replaySnapshots: [],
+    };
+
+    this.rooms.set(roomId, room);
+    await this.syncRoomToRedis(room);
+    return room;
+  }
+
   async getRoomOrHydrate(roomId: string, forceFresh: boolean = false): Promise<MultiplayerRoom | undefined> {
     let room = this.rooms.get(roomId);
     if ((!room || forceFresh) && this.redisService?.get) {
@@ -204,6 +268,7 @@ export class RoomManager {
             // Update existing in-memory room without breaking object reference
             room.participants = new Map(parsed.participants || []);
             room.spectators = new Set(parsed.spectators || []);
+            if (parsed.allowedUserIds) room.allowedUserIds = parsed.allowedUserIds;
           } else {
             room = {
               ...parsed,
@@ -211,6 +276,7 @@ export class RoomManager {
               expiresAt: new Date(parsed.expiresAt || Date.now() + 3600000),
               participants: new Map(parsed.participants || []),
               spectators: new Set(parsed.spectators || []),
+              allowedUserIds: parsed.allowedUserIds || [],
             };
             this.rooms.set(roomId, room);
           }
@@ -257,6 +323,14 @@ export class RoomManager {
     return this.rooms.get(roomId);
   }
 
+  setAllowedUserIds(roomId: string, userIds: string[]) {
+    const room = this.rooms.get(roomId);
+    if (room) {
+      room.allowedUserIds = userIds;
+      this.syncRoomToRedis(room).catch(() => {});
+    }
+  }
+
   // Joins a player with boundary enforcement & Redis lock
   async joinRoom(
     roomId: string,
@@ -275,6 +349,16 @@ export class RoomManager {
 
     if (room.state !== RoomState.WAITING && room.state !== RoomState.READY) {
       throw new BadRequestException('Cannot join: Race is already in progress or has concluded.');
+    }
+
+    // Strict Tournament Heat Player Isolation
+    if (room.allowedUserIds && room.allowedUserIds.length > 0) {
+      const isAllowed = room.allowedUserIds.some((id) => id.toString() === user.userId.toString());
+      if (!isAllowed) {
+        throw new ForbiddenException(
+          'You are not assigned to this tournament heat. Each player can join their own heat only.',
+        );
+      }
     }
 
     // Check existing participant for lobby reconnection
@@ -374,6 +458,7 @@ export class RoomManager {
         hostUserId: room.hostUserId,
         minPlayers: room.minPlayers,
         maxPlayers: room.maxPlayers,
+        allowedUserIds: room.allowedUserIds || [],
         state: room.state,
         passage: room.passage,
         participants: Array.from(room.participants.entries()),

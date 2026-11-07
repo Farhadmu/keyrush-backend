@@ -29,7 +29,7 @@ export class HeatParticipant {
 
 @Schema({ timestamps: true })
 export class EventHeat {
-  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Competition', required: true })
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Competition', required: true, index: true })
   competitionId: MongooseSchema.Types.ObjectId;
 
   @Prop({ default: 1 })
@@ -38,7 +38,10 @@ export class EventHeat {
   @Prop({ required: true })
   heatNumber: number;
 
-  @Prop({ default: 'PENDING', enum: ['PENDING', 'READY', 'RACING', 'COMPLETED', 'CANCELLED'] })
+  @Prop({ default: '' })
+  roomId: string; // Dedicated live room ID: e.g. 'ROOM-EVENT-<slug>-H1'
+
+  @Prop({ default: 'PENDING', enum: ['PENDING', 'READY', 'RACING', 'COMPLETED', 'CANCELLED', 'DISPUTED'] })
   status: string;
 
   @Prop({ type: [HeatParticipant], default: [] })
@@ -48,7 +51,52 @@ export class EventHeat {
   passageId: MongooseSchema.Types.ObjectId;
 
   @Prop({ default: null })
+  scheduledStartTime: Date;
+
+  @Prop({ default: null })
+  actualStartTime: Date;
+
+  @Prop({ default: null })
   completedAt: Date;
+
+  @Prop({
+    type: [
+      {
+        userId: String,
+        username: String,
+        disconnectedAt: Date,
+        reconnectedAt: Date,
+      },
+    ],
+    default: [],
+  })
+  disconnectionRecords: Array<{
+    userId: string;
+    username: string;
+    disconnectedAt: Date;
+    reconnectedAt?: Date;
+  }>;
+
+  @Prop({ default: '' })
+  organizerNotes: string;
+
+  @Prop({
+    type: {
+      hasDispute: { type: Boolean, default: false },
+      reason: { type: String, default: '' },
+      resolvedBy: { type: String, default: '' },
+      resolvedAt: { type: Date, default: null },
+    },
+    default: () => ({ hasDispute: false, reason: '', resolvedBy: '', resolvedAt: null }),
+  })
+  disputeState: {
+    hasDispute: boolean;
+    reason: string;
+    resolvedBy: string;
+    resolvedAt: Date | null;
+  };
 }
 
 export const EventHeatSchema = SchemaFactory.createForClass(EventHeat);
+EventHeatSchema.index({ competitionId: 1, roundNumber: 1, heatNumber: 1 }, { unique: true });
+

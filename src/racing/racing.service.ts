@@ -4,6 +4,7 @@ import { Model, Types } from 'mongoose';
 import { RaceResult, RaceResultDocument } from './schemas/race-result.schema';
 import { VehicleCustomization, VehicleCustomizationDocument, VehicleCustomizationOptions } from './schemas/vehicle-customization.schema';
 import { Profile, ProfileDocument } from '../users/schemas/profile.schema';
+import { EventHeat, EventHeatDocument } from '../event-heats/schemas/heat.schema';
 
 export interface CarCatalogItem {
   id: string;
@@ -105,6 +106,7 @@ export class RacingService {
     @InjectModel(RaceResult.name) private readonly raceResultModel: Model<RaceResultDocument>,
     @InjectModel(Profile.name) private readonly profileModel: Model<ProfileDocument>,
     @Optional() @InjectModel(VehicleCustomization.name) private readonly customizationModel?: Model<VehicleCustomizationDocument>,
+    @Optional() @InjectModel(EventHeat.name) private readonly heatModel?: Model<EventHeatDocument>,
   ) {}
 
   getCars(): CarCatalogItem[] {
@@ -385,6 +387,29 @@ export class RacingService {
 
             await profile.save();
           }
+        }
+      }
+
+      // If this race is part of an official tournament heat (e.g. ROOM-EVENT-...)
+      if (data.roomId && data.roomId.startsWith('ROOM-EVENT-') && this.heatModel) {
+        try {
+          const heat = await this.heatModel.findOne({ roomId: data.roomId });
+          if (heat) {
+            heat.status = 'COMPLETED';
+            heat.completedAt = new Date();
+            for (const p of data.participants) {
+              const hp = heat.participants.find((part: any) => part.userId.toString() === p.userId.toString());
+              if (hp) {
+                hp.finishPosition = p.rankPosition;
+                hp.netWpm = p.netWpm;
+                hp.accuracy = p.accuracy;
+              }
+            }
+            await heat.save();
+            this.logger.log(`[Tournament Heat] Heat ${heat.heatNumber} for room ${data.roomId} marked COMPLETED.`);
+          }
+        } catch (heatErr: any) {
+          this.logger.warn(`Could not sync tournament heat for ${data.roomId}: ${heatErr.message}`);
         }
       }
 

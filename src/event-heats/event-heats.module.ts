@@ -5,6 +5,8 @@ import { EventHeatsController } from './event-heats.controller';
 import { EventHeat, EventHeatSchema } from './schemas/heat.schema';
 import { Competition, CompetitionSchema } from '../competitions/schemas/competition.schema';
 import { CompetitionRegistration, CompetitionRegistrationSchema } from '../competitions/schemas/registration.schema';
+import { MultiplayerModule } from '../multiplayer/multiplayer.module';
+import { TypingModule } from '../typing/typing.module';
 
 @Module({
   imports: [
@@ -13,6 +15,8 @@ import { CompetitionRegistration, CompetitionRegistrationSchema } from '../compe
       { name: Competition.name, schema: CompetitionSchema },
       { name: CompetitionRegistration.name, schema: CompetitionRegistrationSchema },
     ]),
+    MultiplayerModule,
+    TypingModule,
   ],
   controllers: [EventHeatsController],
   providers: [EventHeatsService],

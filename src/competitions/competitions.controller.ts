@@ -38,9 +38,89 @@ export class CompetitionsController {
     return this.competitionsService.getCompetitionByIdOrSlug(idOrSlug);
   }
 
+  @UseGuards(JwtAuthGuard)
   @Get(':id/registrations')
-  getRegistrations(@Param('id') id: string) {
-    return this.competitionsService.getRegistrations(id);
+  getRegistrations(
+    @Param('id') id: string,
+    @Query('status') status?: string,
+    @Query('verificationStatus') verificationStatus?: string,
+    @Query('checkInStatus') checkInStatus?: string,
+    @Query('search') search?: string,
+    @CurrentUser() user?: any,
+  ) {
+    return this.competitionsService.getRegistrations(
+      id,
+      {
+        status,
+        verificationStatus,
+        checkInStatus,
+        search,
+      },
+      user,
+    );
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get(':id/registrations/export-csv')
+  async exportRegistrationsCsv(
+    @Param('id') id: string,
+    @CurrentUser() user: any,
+  ) {
+    const csvData = await this.competitionsService.exportRegistrationsCsv(id, user);
+    return {
+      success: true,
+      csv: csvData,
+      filename: `keyrush-tournament-${id}-roster.csv`,
+    };
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get(':id/my-registration')
+  getMyRegistration(
+    @Param('id') id: string,
+    @CurrentUser('userId') userId: string,
+  ) {
+    return this.competitionsService.getMyRegistration(id, userId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post(':id/check-in')
+  checkIn(
+    @Param('id') id: string,
+    @CurrentUser() user: any,
+  ) {
+    return this.competitionsService.checkInParticipant(id, user);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Patch(':id/registrations/:regId/verify')
+  verifyStudent(
+    @Param('id') id: string,
+    @Param('regId') regId: string,
+    @Body() body: { status: 'VERIFIED' | 'REJECTED'; notes?: string },
+    @CurrentUser() user: any,
+  ) {
+    return this.competitionsService.verifyStudentRegistration(id, regId, body.status, body.notes, user);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Patch(':id/schedule')
+  updateSchedule(
+    @Param('id') id: string,
+    @Body() body: any,
+    @CurrentUser() user: any,
+  ) {
+    return this.competitionsService.updateCompetitionSchedule(id, body, user);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Patch(':id/status')
+  updateStatus(
+    @Param('id') id: string,
+    @Body('status') status: any,
+    @CurrentUser() user: any,
+  ) {
+    return this.competitionsService.updateCompetitionStatus(id, status, user);
   }
 
   @UseGuards(JwtAuthGuard)
@@ -57,8 +137,9 @@ export class CompetitionsController {
   registerParticipant(
     @Param('id') id: string,
     @CurrentUser() user: any,
+    @Body() studentData: any,
   ) {
-    return this.competitionsService.registerParticipant(id, user);
+    return this.competitionsService.registerParticipant(id, user, studentData);
   }
 
   @UseGuards(JwtAuthGuard)
